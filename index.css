@@ -270,27 +270,24 @@ body {
 
 
 .today-metrics {
-  display: flex;
-  justify-content: space-evenly;
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  grid-template-columns: 1fr 1fr;
+  grid-auto-flow: column;
   align-items: center;
+  justify-items: center;
   flex-grow: 1;
-  gap: 1rem;
+  gap: 0.5rem 1rem;
 }
 
-.metric-group {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-}
-
-.today-metrics .temp-row {
+.metric-item {
   display: flex;
   align-items: baseline;
   gap: 0.5rem;
 }
 
 .today-metrics .temp-value {
-  font-size: 2.5rem;
+  font-size: 2.2rem;
   font-weight: 500;
 }
 

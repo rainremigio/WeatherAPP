@@ -690,25 +690,21 @@ const App = () => {
                         <button className="btn-hourly" onClick={() => setIsHourlyModalOpen(true)}>Hourly</button>
                     </div>
                     <div className="today-metrics">
-                        <div className="metric-group">
-                            <div className="temp-row">
-                                <span className="temp-value">{Math.round(today?.high ?? 0)}°</span>
-                                <span className="temp-label">HIGH</span>
-                            </div>
-                            <div className="temp-row">
-                                <span className="temp-value">{Math.round(today?.low ?? 0)}°</span>
-                                <span className="temp-label">LOW</span>
-                            </div>
+                        <div className="metric-item">
+                            <span className="temp-value">{Math.round(today?.high ?? 0)}°</span>
+                            <span className="temp-label">HIGH</span>
                         </div>
-                        <div className="metric-group">
-                             <div className="temp-row">
-                                <span className="temp-value">{today?.highHumidity ?? 0}%</span>
-                                <span className="temp-label">HIGH HUM.</span>
-                            </div>
-                            <div className="temp-row">
-                                <span className="temp-value">{today?.lowHumidity ?? 0}%</span>
-                                <span className="temp-label">LOW HUM.</span>
-                            </div>
+                        <div className="metric-item">
+                             <span className="temp-value">{Math.round(today?.low ?? 0)}°</span>
+                             <span className="temp-label">LOW</span>
+                        </div>
+                        <div className="metric-item">
+                            <span className="temp-value">{today?.highHumidity ?? 0}%</span>
+                            <span className="temp-label">HIGH HUM.</span>
+                        </div>
+                        <div className="metric-item">
+                            <span className="temp-value">{today?.lowHumidity ?? 0}%</span>
+                            <span className="temp-label">LOW HUM.</span>
                         </div>
                     </div>
                 </section>
