@@ -429,7 +429,14 @@ const NewsTicker = ({ items }) => {
 const App = () => {
     const [weatherData, setWeatherData] = useState(null);
     const [comparisonCities, setComparisonCities] = useState([]);
-    const [newsItems, setNewsItems] = useState([]);
+    const [newsItems, setNewsItems] = useState([
+        { title: "PAGASA monitors new low-pressure area east of Mindanao" },
+        { title: "Government agencies prepare for upcoming typhoon season" },
+        { title: "Metro Manila traffic update: EDSA sees heavy congestion" },
+        { title: "Economic outlook for the Philippines remains positive" },
+        { title: "New infrastructure projects set to begin in Visayas region" },
+        { title: "Department of Health launches new public health campaign" },
+    ]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
     const [currentTime, setCurrentTime] = useState(new Date());
@@ -437,7 +444,7 @@ const App = () => {
     const [isLocationModalOpen, setIsLocationModalOpen] = useState(false);
     const [isHourlyModalOpen, setIsHourlyModalOpen] = useState(false);
     const [isAlertModalOpen, setIsAlertModalOpen] = useState(false);
-    const [severeWeatherAlert, setSevereWeatherAlert] = useState(false);
+    const [severeWeatherAlert, setSevereWeatherAlert] = useState(null);
     const [locationCoords, setLocationCoords] = useState({ lat: null, lon: null });
     const [lastFetchTime, setLastFetchTime] = useState(null);
     const [timeSinceFetch, setTimeSinceFetch] = useState("00:00");
@@ -445,50 +452,6 @@ const App = () => {
     useEffect(() => {
         const timer = setInterval(() => setCurrentTime(new Date()), 60000);
         return () => clearInterval(timer);
-    }, []);
-
-    useEffect(() => {
-        const fetchNews = async () => {
-            try {
-                const rssUrl = 'https://newsinfo.inquirer.net/category/latest-stories/feed';
-                const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(rssUrl)}`;
-                
-                const response = await fetch(proxyUrl);
-                if (!response.ok) {
-                    throw new Error(`Failed to fetch news feed via proxy: ${response.status} ${response.statusText}`);
-                }
-                
-                const xmlText = await response.text();
-                const parser = new DOMParser();
-                const xmlDoc = parser.parseFromString(xmlText, "application/xml");
-
-                const errorNode = xmlDoc.querySelector("parsererror");
-                if (errorNode) {
-                    console.error("XML parsing error:", errorNode.textContent);
-                    throw new Error("Failed to parse the RSS feed XML.");
-                }
-
-                const items = xmlDoc.querySelectorAll("item");
-                if (items.length === 0) {
-                    setNewsItems([]);
-                    return;
-                }
-
-                const parsedItems = Array.from(items).map(item => {
-                    const titleElement = item.querySelector("title");
-                    return {
-                        title: titleElement ? titleElement.textContent.trim() : 'Untitled',
-                    };
-                }).slice(0, 20);
-
-                setNewsItems(parsedItems);
-
-            } catch (error) {
-                console.error("News feed error:", error);
-                setNewsItems([{ title: "News feed is currently unavailable." }]);
-            }
-        };
-        fetchNews();
     }, []);
 
     useEffect(() => {
@@ -511,7 +474,7 @@ const App = () => {
     const fetchWeatherData = useCallback(async (location) => {
         setLoading(true);
         setError(null);
-        setSevereWeatherAlert(false);
+        setSevereWeatherAlert(null);
         try {
             const fetchComparisonData = async () => {
                 const PHILIPPINE_CITIES = ['Cebu City', 'Davao City', 'Baguio', 'Iloilo City', 'Zamboanga', 'Legazpi'];
@@ -568,10 +531,19 @@ const App = () => {
             if (!weatherResponse.ok) throw new Error('Failed to fetch weather data from Open-Meteo.');
             const openMeteoData = await weatherResponse.json();
 
-            const severeWeatherCodes = [95, 96, 99]; // Thunderstorm, heavy thunderstorm
+            const severeWeatherCodes = [99, 96, 95]; // Order of severity
             const next24hWeatherCodes = openMeteoData.hourly.weather_code.slice(24, 48);
-            const hasSevereWeather = next24hWeatherCodes.some(code => severeWeatherCodes.includes(code));
-            setSevereWeatherAlert(hasSevereWeather);
+            const mostSevereCode = severeWeatherCodes.find(code => next24hWeatherCodes.includes(code));
+
+            if (mostSevereCode) {
+                let alertName = 'Severe Weather';
+                if (mostSevereCode === 99 || mostSevereCode === 96) {
+                    alertName = 'Hail Storm';
+                } else if (mostSevereCode === 95) {
+                    alertName = 'Thunderstorm';
+                }
+                setSevereWeatherAlert(alertName);
+            }
             
             const tideData = generateTideData();
             const summaryText = generateWeatherSummary(openMeteoData);
@@ -677,18 +649,18 @@ const App = () => {
             <header className="top-section">
                 {severeWeatherAlert && (
                     <button className="alert-button" onClick={() => setIsAlertModalOpen(true)}>
-                        Tropical Storm Detected
+                        {severeWeatherAlert} Detected
                     </button>
                 )}
                 <div className="location-header">
                     <h2>Today in {location?.city}</h2>
-                    <button className="edit-btn" onClick={() => setIsLocationModalOpen(true)} aria-label="Change location">
+                    <button className="edit-btn" onClick={() => setIsLocationModalOpen(true)} aria-label="Change location" title="Change Location">
                         <Icon name="edit" />
                     </button>
                 </div>
                 <div className="current-temp">
                     <h1>{Math.round(current?.temp ?? 0)}°</h1>
-                    <div className="current-humidity">
+                    <div className="current-humidity" title="Current Humidity">
                         <Icon name="humidity" />
                         <span>{current?.humidity ?? 0}%</span>
                     </div>
@@ -696,15 +668,16 @@ const App = () => {
                 <div className="weather-details">
                     <span className="date-info">{formattedDate} &middot; {current?.comparison}</span>
                     <span className="feels-like">Feels like {Math.round(current?.feelsLike ?? 0)}°</span>
-                    <span className="sun-times">
-                        <Icon name="sunrise" /> ↑{current?.sunrise} <Icon name="sunset" /> ↓{current?.sunset}
-                    </span>
+                    <div className="sun-times">
+                        <span className="sun-time-item" title="Sunrise"><Icon name="sunrise" /> ↑{current?.sunrise}</span>
+                        <span className="sun-time-item" title="Sunset"><Icon name="sunset" /> ↓{current?.sunset}</span>
+                    </div>
                 </div>
                 <div className="summary">
                     <p>{current?.summary}</p>
                 </div>
                 <div className="clothing-suggestion">
-                    <div className="pill">
+                    <div className="pill" title="Clothing Suggestion">
                         <Icon name="shirt" /> {current?.clothingSuggestion}
                     </div>
                 </div>
@@ -746,7 +719,7 @@ const App = () => {
                     <div className="forecast-list">
                         {forecast?.map(day => (
                             <div key={day.day} className="forecast-day">
-                                <span><Icon name={getWeatherIcon(day.icon)} /> {Math.round(day.temp)}°</span>
+                                <span title={getWmoDescription(day.icon)}><Icon name={getWeatherIcon(day.icon)} /> {Math.round(day.temp)}°</span>
                                 <span className="forecast-humidity">{day.humidity ?? 0}%</span>
                                 <span>{day.day}</span>
                             </div>
@@ -764,7 +737,9 @@ const App = () => {
                     {comparisonCities.map(city => (
                         <div key={city.name} className="comparison-city-item">
                             <span className="city-name">{city.name}</span>
-                            <Icon name={getWeatherIcon(city.weatherCode)} />
+                            <div title={getWmoDescription(city.weatherCode)}>
+                                <Icon name={getWeatherIcon(city.weatherCode)} />
+                            </div>
                             <span className="city-temp">{Math.round(city.temp)}°</span>
                         </div>
                     ))}
@@ -775,10 +750,10 @@ const App = () => {
             
             <footer className="footer">
                 <div className="footer-details">
-                    <div className="data-row"><Icon name="moon" /> {moonPhase?.toUpperCase()}</div>
-                    <div className="data-row"><Icon name="history" /> {timeSinceFetch}</div>
+                    <div className="data-row" title="Current Moon Phase"><Icon name="moon" /> {moonPhase?.toUpperCase()}</div>
+                    <div className="data-row" title="Time Since Last Update"><Icon name="history" /> {timeSinceFetch}</div>
                 </div>
-                <button className="refresh-btn" onClick={handleManualRefresh} aria-label="Refresh weather data">
+                <button className="refresh-btn" onClick={handleManualRefresh} aria-label="Refresh weather data" title="Refresh Data">
                     <Icon name="refresh" />
                     <span>{currentTime.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}</span>
                 </button>
