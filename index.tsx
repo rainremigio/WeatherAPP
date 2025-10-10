@@ -18,6 +18,7 @@ const Icon = ({ name, ...props }) => {
     'edit': <svg viewBox="0 0 24 24" fill="currentColor" {...props}><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.9959.9959 0 00-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>,
     'tide': <svg viewBox="0 0 24 24" fill="currentColor" {...props}><path d="M2.69,14.61C2.69,14.61,3,15,4,15c1,0,1-0.5,2-0.5s1,0.5,2,0.5s1-0.5,2-0.5s1,0.5,2,0.5s1-0.5,2-0.5 s1,0.5,2,0.5s1.31-0.39,1.31-0.39L20,16v-2l-2.69-1.39C17.31,12.39,17,12,16,12c-1,0-1,0.5-2,0.5s-1-0.5-2-0.5s-1,0.5-2,0.5 s-1-0.5-2-0.5s-1,0.5-2,0.5s-1.31-0.39-1.31-0.39L4,11V9l2.69,1.39C6.69,10.61,7,11,8,11c1,0,1-0.5,2-0.5s1,0.5,2,0.5 s1-0.5,2-0.5s1,0.5,2,0.5s1.31-0.39,1.31-0.39L20,10V8l-2.69-1.39c0,0-0.31-0.39-1.31-0.39c-1,0-1,0.5-2,0.5s-1-0.5-2-0.5 s-1,0.5-2,0.5s-1-0.5-2-0.5s-1,0.5-2,0.5C3,7,2.69,6.61,2.69,6.61L2,7v2l0.69,0.39C2.69,9.61,3,10,4,10c1,0,1-0.5,2-0.5 s1,0.5,2,0.5s-1-0.5-2-0.5s1,0.5,2,0.5s1-0.5,2-0.5s1.31,0.39,1.31,0.39L20,12v2l-0.69,0.39c0,0-0.31,0.39-1.31,0.39 c-1,0-1-0.5-2-0.5s-1,0.5-2,0.5s-1-0.5-2-0.5s-1,0.5-2,0.5s-1-0.5-2-0.5C3,14,2.69,14.39,2.69,14.39L2,15v2l0.69-0.39V14.61z"/></svg>,
     'refresh': <svg viewBox="0 0 24 24" fill="currentColor" {...props}><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>,
+    'thunderstorm': <svg viewBox="0 0 24 24" fill="currentColor" {...props}><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13h4l-5.5 7v-5H8l5.5-7v5z"/></svg>,
   };
   return icons[name] || null;
 };
@@ -28,9 +29,22 @@ const getWeatherIcon = (wmoCode) => {
     if (code === 0) return 'sun';
     if (code >= 1 && code <= 3) return 'partly-cloudy';
     if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) return 'rain';
-    // Add more mappings as needed for snow, thunderstorms etc.
+    if (code >= 95) return 'thunderstorm';
+    // Add more mappings as needed for snow, etc.
     // Default to cloudy for other codes like fog, etc.
     return 'cloud';
+};
+
+// --- WMO Code to Description ---
+const getWmoDescription = (code) => {
+    const wmoMap = {
+        0: 'clear sky', 1: 'mainly clear', 2: 'partly cloudy', 3: 'overcast',
+        45: 'fog', 48: 'depositing rime fog', 51: 'light drizzle', 53: 'moderate drizzle',
+        55: 'dense drizzle', 61: 'slight rain', 63: 'moderate rain', 65: 'heavy rain',
+        80: 'slight rain showers', 81: 'moderate rain showers', 82: 'violent rain showers',
+        95: 'thunderstorm', 96: 'thunderstorm with slight hail', 99: 'thunderstorm with heavy hail',
+    };
+    return wmoMap[code] || 'varied conditions';
 };
 
 const ForecastGraph = ({ data }) => {
@@ -127,7 +141,6 @@ const TideForecastChart = ({ data }) => {
     );
 };
 
-
 const LocationModal = ({ isOpen, onClose, onLocationChange }) => {
     const [input, setInput] = useState('');
     const [suggestions, setSuggestions] = useState([]);
@@ -203,6 +216,61 @@ const LocationModal = ({ isOpen, onClose, onLocationChange }) => {
     );
 };
 
+const HourlyForecastModal = ({ isOpen, onClose, data }) => {
+    if (!isOpen) return null;
+
+    return (
+        <div className="modal-overlay" onClick={onClose}>
+            <div className="modal-content hourly-modal-content" onClick={e => e.stopPropagation()}>
+                <h3>Hourly Forecast</h3>
+                <ul className="hourly-list">
+                    {data.map((hour, index) => (
+                        <li key={index} className="hourly-item">
+                            <span className="time">{hour.time}</span>
+                            <div className="hourly-item-group">
+                                <Icon name={getWeatherIcon(hour.weatherCode)} />
+                                <span className="desc">{getWmoDescription(hour.weatherCode)}</span>
+                            </div>
+                            <div className="hourly-item-group">
+                                <span className="temp">{hour.temp}°</span>
+                                <span className="humidity">{hour.humidity}%</span>
+                            </div>
+                        </li>
+                    ))}
+                </ul>
+                <div className="modal-actions">
+                    <button onClick={onClose} className="btn-primary">Close</button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+const AlertModal = ({ isOpen, onClose, lat, lon }) => {
+    if (!isOpen) return null;
+
+    const mapUrl = `https://embed.windy.com/embed.html?lat=${lat}&lon=${lon}&zoom=7&level=surface&overlay=radar&product=radar&menu=&message=&marker=&calendar=now&pressure=&type=map&location=coordinates&detail=&metricWind=km%2Fh&metricTemp=%C2%B0C&radarRange=-1`;
+
+    return (
+        <div className="modal-overlay" onClick={onClose}>
+            <div className="modal-content alert-modal-content" onClick={e => e.stopPropagation()}>
+                <h3>Doppler Weather Radar</h3>
+                <div className="map-container">
+                    <iframe
+                        width="100%"
+                        height="100%"
+                        src={mapUrl}
+                        title="Doppler Weather Radar"
+                    ></iframe>
+                </div>
+                <div className="modal-actions">
+                    <button onClick={onClose} className="btn-primary">Close</button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
 // --- Moon Phase Calculation ---
 const getMoonPhase = (date = new Date()) => {
     const PHASES = ['New Moon', 'Waxing Crescent', 'First Quarter', 'Waxing Gibbous', 'Full Moon', 'Waning Gibbous', 'Third Quarter', 'Waning Crescent'];
@@ -224,10 +292,8 @@ const generateTideData = () => {
     const baseDate = new Date();
     baseDate.setHours(0, 0, 0, 0);
 
-    // Using a sine wave for a plausible tide simulation
-    // A full tidal cycle is ~12.4 hours, so roughly two high/low pairs a day.
-    const baseHeight = 1.0; // meters
-    const amplitude = 0.8; // meters
+    const baseHeight = 1.0;
+    const amplitude = 0.8;
     const hoursInDay = 24;
     const cycleHours = 12.4;
 
@@ -241,7 +307,6 @@ const generateTideData = () => {
             events: []
         };
         
-        // Find peaks and troughs of the sine wave for the current day
         for (let hour = 0; hour < hoursInDay; hour += 0.25) {
             const totalHours = dayOffset * hoursInDay + hour;
             const prevTotalHours = totalHours - 0.25;
@@ -252,7 +317,6 @@ const generateTideData = () => {
             const eventTime = new Date(currentDate.getTime());
             eventTime.setHours(eventTime.getHours() + hour);
 
-            // Check for local maximum (High tide)
             if (currentHeight > prevHeight && currentHeight > (baseHeight + amplitude * Math.sin(((totalHours + 0.25) / cycleHours) * 2 * Math.PI))) {
                 tidesByDate[dateString].events.push({
                     type: 'High',
@@ -260,7 +324,6 @@ const generateTideData = () => {
                     height: Math.max(0, currentHeight)
                 });
             }
-            // Check for local minimum (Low tide)
             else if (currentHeight < prevHeight && currentHeight < (baseHeight + amplitude * Math.sin(((totalHours + 0.25) / cycleHours) * 2 * Math.PI))) {
                  tidesByDate[dateString].events.push({
                     type: 'Low',
@@ -274,48 +337,69 @@ const generateTideData = () => {
 };
 
 // --- Weather Summary Generator ---
-const getWmoDescription = (code) => {
-    const wmoMap = {
-        0: 'clear skies', 1: 'mainly clear skies', 2: 'partly cloudy skies', 3: 'overcast skies',
-        45: 'fog', 48: 'depositing rime fog', 51: 'light drizzle', 53: 'moderate drizzle',
-        55: 'dense drizzle', 61: 'slight rain', 63: 'moderate rain', 65: 'heavy rain',
-        80: 'slight rain showers', 81: 'moderate rain showers', 82: 'violent rain showers',
-        95: 'a thunderstorm',
-    };
-    return wmoMap[code] || 'varied conditions';
-};
-
 const generateWeatherSummary = (data) => {
-    const { hourly, daily, current } = data;
-    if (!hourly?.time?.length) {
+    const { hourly } = data;
+    const todayStartIndex = 24; 
+
+    if (!hourly?.time?.length || hourly.time.length < todayStartIndex + 24) {
         return `Weather data from Open-Meteo.`;
     }
 
     const now = new Date();
-    const findIndexForHour = (hour) => hourly.time.findIndex(t => {
-        const date = new Date(t);
-        return date.getDate() === now.getDate() && date.getHours() === hour;
-    });
-
-    const morningIndex = findIndexForHour(9);
-    const afternoonIndex = findIndexForHour(15);
+    const currentHour = now.getHours();
+    const currentIndex = todayStartIndex + currentHour;
     
-    const morningDesc = getWmoDescription(hourly.weather_code[morningIndex > -1 ? morningIndex : 0]);
-    const afternoonDesc = getWmoDescription(hourly.weather_code[afternoonIndex > -1 ? afternoonIndex : 6]);
+    if (currentIndex >= hourly.time.length) {
+         return `Currently, you can expect ${getWmoDescription(hourly.weather_code[hourly.weather_code.length - 1])}.`;
+    }
 
-    const todayHourlyTemps = hourly.apparent_temperature.slice(0, 24);
-    const maxFeelsLike = Math.round(Math.max(...todayHourlyTemps));
+    const currentDesc = getWmoDescription(hourly.weather_code[currentIndex]);
+
+    let nextPeriodName = '';
+    let nextPeriodHour = -1;
+
+    if (currentHour < 12) {
+        nextPeriodName = 'this afternoon';
+        nextPeriodHour = 15;
+    } else if (currentHour < 18) {
+        nextPeriodName = 'this evening';
+        nextPeriodHour = 21;
+    } else {
+        nextPeriodName = 'overnight';
+        nextPeriodHour = 3;
+    }
+    
+    let nextPeriodIndex;
+    if (nextPeriodHour > currentHour) {
+        nextPeriodIndex = todayStartIndex + nextPeriodHour;
+    } else {
+        const tomorrowStartIndex = todayStartIndex + 24;
+        nextPeriodIndex = tomorrowStartIndex + nextPeriodHour;
+    }
+
+    if (nextPeriodIndex >= hourly.time.length) {
+        return `Currently, you can expect ${currentDesc}.`;
+    }
+
+    const nextPeriodDesc = getWmoDescription(hourly.weather_code[nextPeriodIndex]);
+    const remainingTodayTemps = hourly.apparent_temperature.slice(currentIndex, todayStartIndex + 24);
     
     let tempDesc = '';
-    if (maxFeelsLike > 32) tempDesc = "hot";
-    else if (maxFeelsLike > 25) tempDesc = "warm";
-    else if (maxFeelsLike > 18) tempDesc = "mild";
-    else if (maxFeelsLike > 10) tempDesc = "cool";
-    else tempDesc = "cold";
+    if (remainingTodayTemps.length > 0) {
+        const maxFeelsLike = Math.round(Math.max(...remainingTodayTemps));
+        if (maxFeelsLike > 32) tempDesc = "hot";
+        else if (maxFeelsLike > 25) tempDesc = "warm";
+        else if (maxFeelsLike > 18) tempDesc = "mild";
+        else if (maxFeelsLike > 10) tempDesc = "cool";
+        else tempDesc = "cold";
+    }
 
-    let summary = morningDesc === afternoonDesc
-        ? `Expect ${morningDesc} throughout the day with ${tempDesc} temperatures.`
-        : `A morning of ${morningDesc} will transition to a ${tempDesc} afternoon with ${afternoonDesc}.`;
+    let summary;
+    if (currentDesc === nextPeriodDesc) {
+        summary = `Expect ${currentDesc} to continue into ${nextPeriodName}, with ${tempDesc} conditions.`;
+    } else {
+        summary = `Currently seeing ${currentDesc}, transitioning to ${nextPeriodDesc} ${nextPeriodName}.`;
+    }
 
     return summary.charAt(0).toUpperCase() + summary.slice(1);
 };
@@ -348,7 +432,10 @@ const App = () => {
     const [error, setError] = useState(null);
     const [currentTime, setCurrentTime] = useState(new Date());
     const [currentLocation, setCurrentLocation] = useState("Manila, Philippines");
-    const [isModalOpen, setIsModalOpen] = useState(false);
+    const [isLocationModalOpen, setIsLocationModalOpen] = useState(false);
+    const [isHourlyModalOpen, setIsHourlyModalOpen] = useState(false);
+    const [isAlertModalOpen, setIsAlertModalOpen] = useState(false);
+    const [severeWeatherAlert, setSevereWeatherAlert] = useState(false);
     const [lastFetchTime, setLastFetchTime] = useState(null);
     const [timeSinceFetch, setTimeSinceFetch] = useState("00:00");
 
@@ -361,8 +448,6 @@ const App = () => {
         const fetchNews = async () => {
             try {
                 const rssUrl = 'https://newsinfo.inquirer.net/category/latest-stories/feed';
-                // Using a CORS proxy to bypass CORS restrictions on the client side.
-                // This fetches the raw XML content of the RSS feed.
                 const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(rssUrl)}`;
                 
                 const response = await fetch(proxyUrl);
@@ -371,40 +456,32 @@ const App = () => {
                 }
                 
                 const xmlText = await response.text();
-                
-                // Use the browser's built-in DOMParser to parse the XML string.
                 const parser = new DOMParser();
                 const xmlDoc = parser.parseFromString(xmlText, "application/xml");
 
-                // Check for parsing errors which some browsers report as a specific node.
                 const errorNode = xmlDoc.querySelector("parsererror");
                 if (errorNode) {
                     console.error("XML parsing error:", errorNode.textContent);
                     throw new Error("Failed to parse the RSS feed XML.");
                 }
 
-                // Select all <item> elements, which represent individual news articles.
                 const items = xmlDoc.querySelectorAll("item");
                 if (items.length === 0) {
-                    console.warn("No news items found in the RSS feed.");
                     setNewsItems([]);
                     return;
                 }
 
-                // Map over the XML nodes to extract the title from each item.
                 const parsedItems = Array.from(items).map(item => {
                     const titleElement = item.querySelector("title");
                     return {
-                        // Use textContent to get the title, and trim whitespace.
                         title: titleElement ? titleElement.textContent.trim() : 'Untitled',
                     };
-                }).slice(0, 20); // Limit to a reasonable number of items.
+                }).slice(0, 20);
 
                 setNewsItems(parsedItems);
 
             } catch (error) {
                 console.error("News feed error:", error);
-                // If anything goes wrong, display an error message in the ticker.
                 setNewsItems([{ title: "News feed is currently unavailable." }]);
             }
         };
@@ -432,7 +509,6 @@ const App = () => {
         setLoading(true);
         setError(null);
         try {
-             // Fetch comparison cities data in parallel
             const fetchComparisonData = async () => {
                 const PHILIPPINE_CITIES = ['Cebu City', 'Davao City', 'Baguio', 'Iloilo City', 'Zamboanga', 'Legazpi'];
                 const NCR_CITIES = ['Quezon City', 'Makati', 'Pasig', 'Taguig', 'Mandaluyong'];
@@ -454,34 +530,31 @@ const App = () => {
                             weatherCode: weatherData.current.weather_code,
                         };
                     } catch {
-                        return null; // Ignore errors for individual cities
+                        return null;
                     }
                 });
                 const results = (await Promise.all(promises)).filter(Boolean);
                 setComparisonCities(results);
             };
 
-            // 1. Geocode location name to get coordinates
             const geoResponse = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(location)}&count=1&format=json`);
             if (!geoResponse.ok) throw new Error('Failed to geocode location.');
             const geoData = await geoResponse.json();
             if (!geoData.results || geoData.results.length === 0) throw new Error(`Could not find location: ${location}`);
             const { latitude, longitude, name: city, country, timezone } = geoData.results[0];
 
-            // 2. Fetch weather from Open-Meteo, including past day for comparison
             const weather_params = new URLSearchParams({
                 latitude: String(latitude),
                 longitude: String(longitude),
                 current: "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m",
                 daily: "weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,relative_humidity_2m_max,relative_humidity_2m_min",
-                hourly: "weather_code,apparent_temperature",
+                hourly: "weather_code,apparent_temperature,temperature_2m,relative_humidity_2m",
                 forecast_days: '5',
                 past_days: '1',
                 timezone: timezone || 'auto'
             });
             const weatherUrl = `https://api.open-meteo.com/v1/forecast?${weather_params}`;
             
-            // Fire off all fetches concurrently
             const [weatherResponse] = await Promise.all([
                 fetch(weatherUrl),
                 fetchComparisonData()
@@ -490,7 +563,6 @@ const App = () => {
             if (!weatherResponse.ok) throw new Error('Failed to fetch weather data from Open-Meteo.');
             const openMeteoData = await weatherResponse.json();
             
-            // 3. Generate data locally and create comparison
             const tideData = generateTideData();
             const summaryText = generateWeatherSummary(openMeteoData);
             
@@ -506,10 +578,24 @@ const App = () => {
             } else {
                 comparisonText = `${Math.round(Math.abs(tempDiff))}° cooler than yesterday`;
             }
+            
+            const now = new Date();
+            const currentHour = now.getHours();
+            const todayStartIndex = 24; // API returns 1 past day
+            const currentIndex = todayStartIndex + currentHour;
 
-            // 4. Transform data into the structure our components expect
+            const hourlyData = openMeteoData.hourly.time.slice(currentIndex, currentIndex + 24).map((time, i) => ({
+                time: new Date(time).toLocaleTimeString('en-US', { hour: 'numeric', hour12: true }),
+                temp: Math.round(openMeteoData.hourly.temperature_2m[currentIndex + i]),
+                humidity: openMeteoData.hourly.relative_humidity_2m[currentIndex + i],
+                weatherCode: openMeteoData.hourly.weather_code[currentIndex + i],
+            }));
+            
+            const hasSevereWeather = hourlyData.some(hour => [95, 96, 99].includes(hour.weatherCode));
+            setSevereWeatherAlert(hasSevereWeather);
+
             const transformedData = {
-                location: { city, country },
+                location: { city, country, latitude, longitude },
                 current: {
                     temp: openMeteoData.current.temperature_2m,
                     feelsLike: openMeteoData.current.apparent_temperature,
@@ -533,6 +619,7 @@ const App = () => {
                     temp: openMeteoData.daily.temperature_2m_max[i + 1],
                     humidity: openMeteoData.daily.relative_humidity_2m_max[i + 1],
                 })),
+                hourly: hourlyData,
                 moonPhase: getMoonPhase(),
                 tideForecast: tideData
             };
@@ -576,11 +663,18 @@ const App = () => {
 
     return (
         <div className="dashboard">
-            <LocationModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} onLocationChange={handleLocationChange} />
+            <LocationModal isOpen={isLocationModalOpen} onClose={() => setIsLocationModalOpen(false)} onLocationChange={handleLocationChange} />
+            <HourlyForecastModal isOpen={isHourlyModalOpen} onClose={() => setIsHourlyModalOpen(false)} data={weatherData.hourly} />
+            <AlertModal isOpen={isAlertModalOpen} onClose={() => setIsAlertModalOpen(false)} lat={location.latitude} lon={location.longitude} />
             <header className="top-section">
+                {severeWeatherAlert && (
+                    <button className="alert-button" onClick={() => setIsAlertModalOpen(true)}>
+                        Tropical Storm Detected
+                    </button>
+                )}
                 <div className="location-header">
                     <h2>Today in {location?.city}</h2>
-                    <button className="edit-btn" onClick={() => setIsModalOpen(true)} aria-label="Change location">
+                    <button className="edit-btn" onClick={() => setIsLocationModalOpen(true)} aria-label="Change location">
                         <Icon name="edit" />
                     </button>
                 </div>
@@ -610,7 +704,10 @@ const App = () => {
 
             <main className="main-grid">
                 <section className="grid-cell">
-                    <h2 className="cell-title">Today's High/Low</h2>
+                    <div className="cell-header">
+                        <h2 className="cell-title">Today's High/Low</h2>
+                        <button className="btn-hourly" onClick={() => setIsHourlyModalOpen(true)}>Hourly</button>
+                    </div>
                     <div className="today-metrics">
                         <div className="metric-group">
                             <div className="temp-row">
