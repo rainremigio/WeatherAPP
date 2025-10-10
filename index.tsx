@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
+import { GoogleGenAI, Type } from "@google/genai";
+
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 // --- SVG Icons ---
 const Icon = ({ name, ...props }) => {
@@ -48,54 +51,89 @@ const getWmoDescription = (code) => {
 };
 
 const ForecastGraph = ({ data }) => {
-    const { path, dots } = useMemo(() => {
-        if (!data || data.length === 0) return { path: '', dots: [] };
+    const { path, dots, labels } = useMemo(() => {
+        if (!data || data.length === 0) return { path: '', dots: [], labels: [] };
         const validData = data.filter(d => typeof d?.temp === 'number' && d?.day);
-        if (validData.length < 2) return { path: '', dots: [] };
+        if (validData.length < 2) return { path: '', dots: [], labels: [] };
 
-        const width = 250, height = 40, padding = 5;
+        const width = 250, height = 85, padding = 5;
         const temps = validData.map(d => d.temp);
-        const minTemp = Math.min(...temps), maxTemp = Math.max(...temps);
-        const tempRange = maxTemp - minTemp;
+        const minTemp = Math.min(...temps);
+        const maxTemp = Math.max(...temps);
+        
+        const tempSpan = maxTemp - minTemp;
+        const targetRange = 3;
+        
+        let yAxisMin, yAxisMax;
+
+        if (tempSpan < targetRange) {
+            const paddingNeeded = (targetRange - tempSpan) / 2;
+            yAxisMin = Math.floor(minTemp - paddingNeeded);
+            yAxisMax = Math.ceil(maxTemp + paddingNeeded);
+        } else {
+            yAxisMin = Math.floor(minTemp - 1);
+            yAxisMax = Math.ceil(maxTemp + 1);
+        }
+
+        if (yAxisMax - yAxisMin < targetRange) {
+            yAxisMax = yAxisMin + targetRange;
+        }
+        
+        const yAxisRange = yAxisMax - yAxisMin;
+        
         const getX = i => (i / (validData.length - 1)) * (width - padding * 2) + padding;
-        const getY = t => height - ((tempRange === 0 ? 0.5 : (t - minTemp) / tempRange) * (height - padding * 2) + padding);
+        const getY = t => height - ((yAxisRange === 0 ? 0.5 : (t - yAxisMin) / yAxisRange) * (height - padding * 2) + padding);
         
         const path = validData.map((d, i) => `${i === 0 ? 'M' : 'L'} ${getX(i)},${getY(d.temp)}`).join(' ');
         const dots = validData.map((d, i) => ({ key: d.day, cx: getX(i), cy: getY(d.temp) }));
-        return { path, dots };
+        
+        const yLabels = [];
+        for (let i = yAxisMax; i >= yAxisMin; i--) {
+            yLabels.push(i);
+        }
+
+        return { path, dots, labels: yLabels };
     }, [data]);
 
     if (!path) return null;
-    return <svg viewBox="0 0 250 40"><path d={path} className="line" />{dots.map(d => <circle key={d.key} cx={d.cx} cy={d.cy} r="3" className="dot" />)}</svg>;
+    return (
+        <>
+            <div className="y-axis-labels">
+                {labels.map(label => <span key={label}>{label}°</span>)}
+            </div>
+            <svg viewBox="0 0 250 85" className="forecast-svg">
+                <path d={path} className="line" />
+                {dots.map(d => <circle key={d.key} cx={d.cx} cy={d.cy} r="3" className="dot" />)}
+            </svg>
+        </>
+    );
 };
 
-const TideForecastChart = ({ data }) => {
+const TideTable = ({ data }) => {
     const upcomingEvents = useMemo(() => {
         if (!data || data.length === 0) return [];
-        return data.flatMap(day => 
-            day.events.map(event => ({ ...event, day: day.day, date: day.date }))
-        ).slice(0, 5);
-    }, [data]);
+        
+        const now = new Date();
 
-    const maxHeight = useMemo(() => {
-        if (upcomingEvents.length === 0) return 2.0;
-        const max = Math.max(...upcomingEvents.map(e => e.height));
-        return Math.ceil(max * 2) / 2;
-    }, [upcomingEvents]);
-    
-    const yAxisLabels = useMemo(() => {
-        const labels = [];
-        if (maxHeight <= 0) return [];
-        for (let i = maxHeight; i >= 0; i -= 0.2) {
-             const isMajor = Math.abs(i * 10) % 5 === 0;
-            labels.push({ value: i.toFixed(1), isMajor });
-        }
-        return labels;
-    }, [maxHeight]);
+        const allEvents = data.flatMap(day => {
+            return day.events.map(event => {
+                const eventDate = event.time; // event.time is now a Date object
+                
+                return { 
+                    ...event, 
+                    fullDate: eventDate, 
+                    day: day.day,
+                    time: eventDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }) 
+                };
+            });
+        });
+        
+        return allEvents.filter(event => event.fullDate > now).slice(0, 4);
+    }, [data]);
 
     if (upcomingEvents.length === 0) {
         return (
-            <section className="tide-forecast-section no-data">
+            <section className="tide-table-section no-data">
                 <Icon name="tide" />
                 <span>Tide forecast unavailable</span>
             </section>
@@ -103,40 +141,19 @@ const TideForecastChart = ({ data }) => {
     }
     
     return (
-        <section className="tide-forecast-section">
+        <section className="tide-table-section">
             <h2 className="cell-title">Tide Forecast</h2>
-            <div className="tide-chart-container">
-                <div className="tide-yaxis">
-                    {yAxisLabels.map(label => (
-                        <div key={label.value} className={`tide-yaxis-item ${label.isMajor ? 'major' : ''}`}>
-                            <span>{label.isMajor ? label.value : ''}</span>
-                            <div className="tick"></div>
-                        </div>
-                    ))}
-                </div>
-                <div className="tide-bars-area">
-                    {upcomingEvents.map((event, index) => {
-                        const barHeight = Math.max(0, (event.height / maxHeight) * 100);
-                        return (
-                            <div key={index} className="tide-event-column">
-                                <div className="tide-height-label">{event.height.toFixed(1)}M</div>
-                                <div className="tide-bar-visual">
-                                    <div 
-                                        className={`tide-bar-element ${event.type.toLowerCase()}`}
-                                        style={{ height: `${barHeight}%` }}
-                                    >
-                                        <span className="tide-time-label">{event.time}</span>
-                                    </div>
-                                </div >
-                                <div className="tide-day-label">
-                                    <span>{event.day}</span>
-                                    <span>{event.date}</span>
-                                </div>
-                            </div>
-                        );
-                    })}
-                </div>
-            </div>
+            <ul className="tide-list">
+                {upcomingEvents.map((event, index) => (
+                    <li key={index} className={`tide-event-item ${index === 0 ? 'next-event' : ''}`}>
+                        <span className="tide-event-details">
+                            <span className="tide-type">{event.type} Tide</span>
+                            <span className="tide-time">{event.time} - {event.day}</span>
+                        </span>
+                        <span className="tide-height">{event.height.toFixed(1)}M</span>
+                    </li>
+                ))}
+            </ul>
         </section>
     );
 };
@@ -322,14 +339,14 @@ const generateTideData = () => {
             if (currentHeight > prevHeight && currentHeight > (baseHeight + amplitude * Math.sin(((totalHours + 0.25) / cycleHours) * 2 * Math.PI))) {
                 tidesByDate[dateString].events.push({
                     type: 'High',
-                    time: eventTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }),
+                    time: eventTime,
                     height: Math.max(0, currentHeight)
                 });
             }
             else if (currentHeight < prevHeight && currentHeight < (baseHeight + amplitude * Math.sin(((totalHours + 0.25) / cycleHours) * 2 * Math.PI))) {
                  tidesByDate[dateString].events.push({
                     type: 'Low',
-                    time: eventTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }),
+                    time: eventTime,
                     height: Math.max(0, currentHeight)
                 });
             }
@@ -429,14 +446,7 @@ const NewsTicker = ({ items }) => {
 const App = () => {
     const [weatherData, setWeatherData] = useState(null);
     const [comparisonCities, setComparisonCities] = useState([]);
-    const [newsItems, setNewsItems] = useState([
-        { title: "PAGASA monitors new low-pressure area east of Mindanao" },
-        { title: "Government agencies prepare for upcoming typhoon season" },
-        { title: "Metro Manila traffic update: EDSA sees heavy congestion" },
-        { title: "Economic outlook for the Philippines remains positive" },
-        { title: "New infrastructure projects set to begin in Visayas region" },
-        { title: "Department of Health launches new public health campaign" },
-    ]);
+    const [newsItems, setNewsItems] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
     const [currentTime, setCurrentTime] = useState(new Date());
@@ -447,34 +457,48 @@ const App = () => {
     const [severeWeatherAlert, setSevereWeatherAlert] = useState(null);
     const [locationCoords, setLocationCoords] = useState({ lat: null, lon: null });
     const [lastFetchTime, setLastFetchTime] = useState(null);
-    const [timeSinceFetch, setTimeSinceFetch] = useState("00:00");
 
     useEffect(() => {
         const timer = setInterval(() => setCurrentTime(new Date()), 60000);
         return () => clearInterval(timer);
     }, []);
-
-    useEffect(() => {
-        if (!lastFetchTime) return;
-
-        const timerId = setInterval(() => {
-            const now = new Date();
-            const diffSeconds = Math.floor((now.getTime() - lastFetchTime.getTime()) / 1000);
-            
-            const minutes = Math.floor(diffSeconds / 60);
-            const seconds = diffSeconds % 60;
-            
-            const formattedTime = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-            setTimeSinceFetch(formattedTime);
-        }, 1000);
-
-        return () => clearInterval(timerId);
-    }, [lastFetchTime]);
     
+    const fetchNewsData = useCallback(async () => {
+        try {
+            // Use Google Search grounding to get real-time news.
+            const response = await ai.models.generateContent({
+                model: "gemini-2.5-flash",
+                contents: "List the top 6 latest breaking news headlines in the Philippines. Please provide them as a numbered list.",
+                config: {
+                    tools: [{ googleSearch: {} }],
+                },
+            });
+
+            // Parse the plain text response.
+            const headlinesText = response.text;
+            const headlines = headlinesText
+                .split('\n')
+                .map(line => line.trim().replace(/^\d+\.\s*/, '')) // Remove numbering like "1. "
+                .filter(line => line.length > 0) // Filter out empty lines
+                .map(title => ({ title })); // Format for the NewsTicker component
+
+            if (headlines.length === 0) {
+              throw new Error("No headlines found in response.");
+            }
+            
+            setNewsItems(headlines);
+        } catch (err) {
+            console.error("Failed to fetch news from Gemini with Search Grounding:", err);
+            setNewsItems([{ title: "News feed currently unavailable. Please try again later." }]);
+        }
+    }, []);
+
     const fetchWeatherData = useCallback(async (location) => {
         setLoading(true);
         setError(null);
         setSevereWeatherAlert(null);
+        const fetchTimestamp = new Date(); // Capture timestamp at the start of the fetch attempt
+
         try {
             const fetchComparisonData = async () => {
                 const PHILIPPINE_CITIES = ['Cebu City', 'Davao City', 'Baguio', 'Iloilo City', 'Zamboanga', 'Legazpi'];
@@ -567,7 +591,7 @@ const App = () => {
             const currentIndex = todayStartIndex + currentHour;
 
             const hourlyData = openMeteoData.hourly.time.slice(currentIndex, currentIndex + 24).map((time, i) => ({
-                time: new Date(time).toLocaleTimeString('en-US', { hour: 'numeric', hour12: true }),
+                time: new Date(time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }),
                 temp: Math.round(openMeteoData.hourly.temperature_2m[currentIndex + i]),
                 humidity: openMeteoData.hourly.relative_humidity_2m[currentIndex + i],
                 weatherCode: openMeteoData.hourly.weather_code[currentIndex + i],
@@ -579,8 +603,8 @@ const App = () => {
                     temp: openMeteoData.current.temperature_2m,
                     feelsLike: openMeteoData.current.apparent_temperature,
                     summary: summaryText,
-                    sunrise: new Date(openMeteoData.daily.sunrise[1]).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }),
-                    sunset: new Date(openMeteoData.daily.sunset[1]).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }),
+                    sunrise: new Date(openMeteoData.daily.sunrise[1]).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }),
+                    sunset: new Date(openMeteoData.daily.sunset[1]).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }),
                     comparison: comparisonText,
                     clothingSuggestion: openMeteoData.current.temperature_2m > 25 ? 'Light clothing advised' : 'Consider a light jacket',
                     humidity: openMeteoData.current.relative_humidity_2m,
@@ -604,7 +628,7 @@ const App = () => {
             };
 
             setWeatherData(transformedData);
-            setLastFetchTime(new Date());
+            setLastFetchTime(fetchTimestamp); // Apply timestamp only on successful fetch
 
         } catch (err) {
             console.error(err);
@@ -616,21 +640,27 @@ const App = () => {
     
     useEffect(() => {
         const fetchAllData = async () => {
-            await fetchWeatherData(currentLocation);
+            await Promise.all([
+                fetchWeatherData(currentLocation),
+                fetchNewsData()
+            ]);
         };
 
         fetchAllData(); // Initial fetch
         const intervalId = setInterval(fetchAllData, 900000); // Auto-refresh every 15 minutes
 
         return () => clearInterval(intervalId);
-    }, [currentLocation, fetchWeatherData]);
+    }, [currentLocation, fetchWeatherData, fetchNewsData]);
 
     const handleLocationChange = (newLocation) => {
         setCurrentLocation(newLocation);
     };
     
     const handleManualRefresh = async () => {
-        await fetchWeatherData(currentLocation);
+         await Promise.all([
+            fetchWeatherData(currentLocation),
+            fetchNewsData()
+        ]);
     };
 
     if (loading) return <div className="loading-container">Loading Weather Data...</div>;
@@ -639,6 +669,9 @@ const App = () => {
     
     const { location, current, today, forecast, moonPhase } = weatherData;
     const formattedDate = new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+    const lastUpdatedTime = lastFetchTime 
+        ? `Updated: ${lastFetchTime.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}`
+        : 'Updating...';
 
     return (
         <div className="dashboard">
@@ -709,7 +742,7 @@ const App = () => {
                     </div>
                 </section>
                 <section className="grid-cell">
-                    <div className="forecast-graph">
+                    <div className="forecast-graph-wrapper">
                         <ForecastGraph data={forecast} />
                     </div>
                     <div className="forecast-list">
@@ -723,7 +756,7 @@ const App = () => {
                     </div>
                 </section>
                 <section className="grid-cell details-cell">
-                     <TideForecastChart data={weatherData.tideForecast} />
+                     <TideTable data={weatherData.tideForecast} />
                 </section>
             </main>
             
@@ -747,7 +780,7 @@ const App = () => {
             <footer className="footer">
                 <div className="footer-details">
                     <div className="data-row" title="Current Moon Phase"><Icon name="moon" /> {moonPhase?.toUpperCase()}</div>
-                    <div className="data-row" title="Time Since Last Update"><Icon name="history" /> {timeSinceFetch}</div>
+                    <div className="data-row" title="Last Update Time"><Icon name="history" /> {lastUpdatedTime}</div>
                 </div>
                 <button className="refresh-btn" onClick={handleManualRefresh} aria-label="Refresh weather data" title="Refresh Data">
                     <Icon name="refresh" />
