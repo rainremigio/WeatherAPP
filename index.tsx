@@ -247,20 +247,21 @@ const HourlyForecastModal = ({ isOpen, onClose, data }) => {
 };
 
 const AlertModal = ({ isOpen, onClose, lat, lon }) => {
-    if (!isOpen) return null;
+    if (!isOpen || !lat || !lon) return null;
 
-    const mapUrl = `https://embed.windy.com/embed.html?lat=${lat}&lon=${lon}&zoom=7&level=surface&overlay=radar&product=radar&menu=&message=&marker=&calendar=now&pressure=&type=map&location=coordinates&detail=&metricWind=km%2Fh&metricTemp=%C2%B0C&radarRange=-1`;
+    const mapUrl = `https://embed.windy.com/embed.html?lat=${lat}&lon=${lon}&zoom=7&level=surface&overlay=radar&menu=&message=true&marker=true&calendar=now&pressure=&type=map&location=coordinates&detail=&metricWind=km%2Fh&metricTemp=%C2%B0C&radarRange=-1`;
 
     return (
         <div className="modal-overlay" onClick={onClose}>
             <div className="modal-content alert-modal-content" onClick={e => e.stopPropagation()}>
-                <h3>Doppler Weather Radar</h3>
+                <h3>Live Doppler Radar</h3>
                 <div className="map-container">
                     <iframe
                         width="100%"
                         height="100%"
                         src={mapUrl}
-                        title="Doppler Weather Radar"
+                        frameBorder="0"
+                        title="Doppler Radar Map"
                     ></iframe>
                 </div>
                 <div className="modal-actions">
@@ -270,6 +271,7 @@ const AlertModal = ({ isOpen, onClose, lat, lon }) => {
         </div>
     );
 };
+
 
 // --- Moon Phase Calculation ---
 const getMoonPhase = (date = new Date()) => {
@@ -436,6 +438,7 @@ const App = () => {
     const [isHourlyModalOpen, setIsHourlyModalOpen] = useState(false);
     const [isAlertModalOpen, setIsAlertModalOpen] = useState(false);
     const [severeWeatherAlert, setSevereWeatherAlert] = useState(false);
+    const [locationCoords, setLocationCoords] = useState({ lat: null, lon: null });
     const [lastFetchTime, setLastFetchTime] = useState(null);
     const [timeSinceFetch, setTimeSinceFetch] = useState("00:00");
 
@@ -508,6 +511,7 @@ const App = () => {
     const fetchWeatherData = useCallback(async (location) => {
         setLoading(true);
         setError(null);
+        setSevereWeatherAlert(false);
         try {
             const fetchComparisonData = async () => {
                 const PHILIPPINE_CITIES = ['Cebu City', 'Davao City', 'Baguio', 'Iloilo City', 'Zamboanga', 'Legazpi'];
@@ -542,6 +546,7 @@ const App = () => {
             const geoData = await geoResponse.json();
             if (!geoData.results || geoData.results.length === 0) throw new Error(`Could not find location: ${location}`);
             const { latitude, longitude, name: city, country, timezone } = geoData.results[0];
+            setLocationCoords({ lat: latitude, lon: longitude });
 
             const weather_params = new URLSearchParams({
                 latitude: String(latitude),
@@ -562,6 +567,11 @@ const App = () => {
 
             if (!weatherResponse.ok) throw new Error('Failed to fetch weather data from Open-Meteo.');
             const openMeteoData = await weatherResponse.json();
+
+            const severeWeatherCodes = [95, 96, 99]; // Thunderstorm, heavy thunderstorm
+            const next24hWeatherCodes = openMeteoData.hourly.weather_code.slice(24, 48);
+            const hasSevereWeather = next24hWeatherCodes.some(code => severeWeatherCodes.includes(code));
+            setSevereWeatherAlert(hasSevereWeather);
             
             const tideData = generateTideData();
             const summaryText = generateWeatherSummary(openMeteoData);
@@ -590,12 +600,9 @@ const App = () => {
                 humidity: openMeteoData.hourly.relative_humidity_2m[currentIndex + i],
                 weatherCode: openMeteoData.hourly.weather_code[currentIndex + i],
             }));
-            
-            const hasSevereWeather = hourlyData.some(hour => [95, 96, 99].includes(hour.weatherCode));
-            setSevereWeatherAlert(hasSevereWeather);
 
             const transformedData = {
-                location: { city, country, latitude, longitude },
+                location: { city, country },
                 current: {
                     temp: openMeteoData.current.temperature_2m,
                     feelsLike: openMeteoData.current.apparent_temperature,
@@ -665,7 +672,8 @@ const App = () => {
         <div className="dashboard">
             <LocationModal isOpen={isLocationModalOpen} onClose={() => setIsLocationModalOpen(false)} onLocationChange={handleLocationChange} />
             <HourlyForecastModal isOpen={isHourlyModalOpen} onClose={() => setIsHourlyModalOpen(false)} data={weatherData.hourly} />
-            <AlertModal isOpen={isAlertModalOpen} onClose={() => setIsAlertModalOpen(false)} lat={location.latitude} lon={location.longitude} />
+            <AlertModal isOpen={isAlertModalOpen} onClose={() => setIsAlertModalOpen(false)} lat={locationCoords.lat} lon={locationCoords.lon} />
+
             <header className="top-section">
                 {severeWeatherAlert && (
                     <button className="alert-button" onClick={() => setIsAlertModalOpen(true)}>
