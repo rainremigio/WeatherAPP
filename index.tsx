@@ -84,7 +84,38 @@ const ForecastGraph = ({ data }) => {
         const getX = i => (i / (validData.length - 1)) * (width - padding * 2) + padding;
         const getY = t => height - ((yAxisRange === 0 ? 0.5 : (t - yAxisMin) / yAxisRange) * (height - padding * 2) + padding);
         
-        const path = validData.map((d, i) => `${i === 0 ? 'M' : 'L'} ${getX(i)},${getY(d.temp)}`).join(' ');
+        // --- Spline path calculation ---
+        const points = validData.map((d, i) => ({ x: getX(i), y: getY(d.temp) }));
+
+        const controlPoint = (current, previous, next, reverse) => {
+            const p = previous || current;
+            const n = next || current;
+            // Smoothing ratio, can be adjusted
+            const smoothing = 0.2;
+            // Properties of the line between previous and next points
+            const o = { x: n.x - p.x, y: n.y - p.y };
+            const angle = Math.atan2(o.y, o.x);
+            const length = Math.sqrt(o.x * o.x + o.y * o.y) * smoothing;
+            // The control point position is relative to the current point
+            const x = current.x + Math.cos(angle) * length * (reverse ? -1 : 1);
+            const y = current.y + Math.sin(angle) * length * (reverse ? -1 : 1);
+            return [x, y];
+        };
+        
+        const path = points.reduce((acc, point, i, a) => {
+            if (i === 0) {
+                return `M ${point.x.toFixed(2)},${point.y.toFixed(2)}`;
+            }
+            // First control point (for the previous point)
+            // FIX: Added 'false' for the 'reverse' parameter to match the function signature.
+            const [cpsX, cpsY] = controlPoint(a[i - 1], a[i - 2], point, false);
+            // Second control point (for the current point)
+            const [cpeX, cpeY] = controlPoint(point, a[i - 1], a[i + 1], true);
+            return `${acc} C ${cpsX.toFixed(2)},${cpsY.toFixed(2)} ${cpeX.toFixed(2)},${cpeY.toFixed(2)} ${point.x.toFixed(2)},${point.y.toFixed(2)}`;
+        }, '');
+
+        // --- End of spline logic ---
+
         const dots = validData.map((d, i) => ({ key: d.day, cx: getX(i), cy: getY(d.temp) }));
         
         const yLabels = [];
@@ -109,7 +140,7 @@ const ForecastGraph = ({ data }) => {
     );
 };
 
-const TideTable = ({ data }) => {
+const TideTable = ({ data, moonPhase }) => {
     const upcomingEvents = useMemo(() => {
         if (!data || data.length === 0) return [];
         
@@ -154,6 +185,10 @@ const TideTable = ({ data }) => {
                     </li>
                 ))}
             </ul>
+             <div className="moon-phase-container">
+                <Icon name="moon" />
+                <span>{moonPhase?.toUpperCase()}</span>
+            </div>
         </section>
     );
 };
@@ -288,6 +323,20 @@ const AlertModal = ({ isOpen, onClose, lat, lon }) => {
         </div>
     );
 };
+
+const DarkModeToggle = ({ theme, toggleTheme }) => (
+  <button 
+    className="dark-mode-toggle" 
+    onClick={toggleTheme} 
+    aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}
+    title={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}
+  >
+    <div className="toggle-icon-wrapper">
+      <Icon name="sun" className="toggle-icon sun-icon" />
+      <Icon name="moon" className="toggle-icon moon-icon" />
+    </div>
+  </button>
+);
 
 
 // --- Moon Phase Calculation ---
@@ -457,6 +506,20 @@ const App = () => {
     const [severeWeatherAlert, setSevereWeatherAlert] = useState(null);
     const [locationCoords, setLocationCoords] = useState({ lat: null, lon: null });
     const [lastFetchTime, setLastFetchTime] = useState(null);
+    const [theme, setTheme] = useState(() => {
+        const savedTheme = localStorage.getItem('theme');
+        const userPrefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        return savedTheme || (userPrefersDark ? 'dark' : 'light');
+    });
+
+    useEffect(() => {
+        document.body.setAttribute('data-theme', theme);
+        localStorage.setItem('theme', theme);
+    }, [theme]);
+
+    const toggleTheme = () => {
+        setTheme(prevTheme => prevTheme === 'light' ? 'dark' : 'light');
+    };
 
     useEffect(() => {
         const timer = setInterval(() => setCurrentTime(new Date()), 60000);
@@ -680,17 +743,22 @@ const App = () => {
             <AlertModal isOpen={isAlertModalOpen} onClose={() => setIsAlertModalOpen(false)} lat={locationCoords.lat} lon={locationCoords.lon} />
 
             <header className="top-section">
+                <div className="header-main">
+                    <div className="location-header">
+                        <h2>Today in {location?.city}</h2>
+                        <button className="edit-btn" onClick={() => setIsLocationModalOpen(true)} aria-label="Change location" title="Change Location">
+                            <Icon name="edit" />
+                        </button>
+                    </div>
+                    <DarkModeToggle theme={theme} toggleTheme={toggleTheme} />
+                </div>
+
                 {severeWeatherAlert && (
                     <button className="alert-button" onClick={() => setIsAlertModalOpen(true)}>
                         {severeWeatherAlert} Detected
                     </button>
                 )}
-                <div className="location-header">
-                    <h2>Today in {location?.city}</h2>
-                    <button className="edit-btn" onClick={() => setIsLocationModalOpen(true)} aria-label="Change location" title="Change Location">
-                        <Icon name="edit" />
-                    </button>
-                </div>
+                
                 <div className="current-temp">
                     <h1>{Math.round(current?.temp ?? 0)}°</h1>
                     <div className="current-humidity" title="Current Humidity">
@@ -699,12 +767,14 @@ const App = () => {
                     </div>
                 </div>
                 <div className="weather-details">
-                    <span className="date-info">{formattedDate} &middot; {current?.comparison}</span>
-                    <span className="feels-like">Feels like {Math.round(current?.feelsLike ?? 0)}°</span>
-                    <div className="sun-times">
-                        <span className="sun-time-item" title="Sunrise"><Icon name="sunrise" /> ↑{current?.sunrise}</span>
-                        <span className="sun-time-item" title="Sunset"><Icon name="sunset" /> ↓{current?.sunset}</span>
+                    <div className="date-sun-group">
+                        <span className="date-info">{formattedDate} &middot; {current?.comparison}</span>
+                        <div className="sun-times">
+                            <span className="sun-time-item" title="Sunrise"><Icon name="sunrise" /> ↑{current?.sunrise}</span>
+                            <span className="sun-time-item" title="Sunset"><Icon name="sunset" /> ↓{current?.sunset}</span>
+                        </div>
                     </div>
+                    <span className="feels-like">Feels like {Math.round(current?.feelsLike ?? 0)}°</span>
                 </div>
                 <div className="summary">
                     <p>{current?.summary}</p>
@@ -723,19 +793,19 @@ const App = () => {
                         <button className="btn-hourly" onClick={() => setIsHourlyModalOpen(true)}>Hourly</button>
                     </div>
                     <div className="today-metrics">
-                        <div className="metric-item">
+                        <div className="metric-item is-temp">
                             <span className="temp-value">{Math.round(today?.high ?? 0)}°</span>
                             <span className="temp-label">HIGH</span>
                         </div>
-                        <div className="metric-item">
+                        <div className="metric-item is-temp">
                              <span className="temp-value">{Math.round(today?.low ?? 0)}°</span>
                              <span className="temp-label">LOW</span>
                         </div>
-                        <div className="metric-item">
+                        <div className="metric-item is-humidity">
                             <span className="temp-value">{today?.highHumidity ?? 0}%</span>
                             <span className="temp-label">HIGH HUM.</span>
                         </div>
-                        <div className="metric-item">
+                        <div className="metric-item is-humidity">
                             <span className="temp-value">{today?.lowHumidity ?? 0}%</span>
                             <span className="temp-label">LOW HUM.</span>
                         </div>
@@ -756,7 +826,7 @@ const App = () => {
                     </div>
                 </section>
                 <section className="grid-cell details-cell">
-                     <TideTable data={weatherData.tideForecast} />
+                     <TideTable data={weatherData.tideForecast} moonPhase={moonPhase} />
                 </section>
             </main>
             
@@ -779,7 +849,6 @@ const App = () => {
             
             <footer className="footer">
                 <div className="footer-details">
-                    <div className="data-row" title="Current Moon Phase"><Icon name="moon" /> {moonPhase?.toUpperCase()}</div>
                     <div className="data-row" title="Last Update Time"><Icon name="history" /> {lastUpdatedTime}</div>
                 </div>
                 <button className="refresh-btn" onClick={handleManualRefresh} aria-label="Refresh weather data" title="Refresh Data">
