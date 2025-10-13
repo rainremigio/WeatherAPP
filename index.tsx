@@ -1,8 +1,114 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef, useLayoutEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { GoogleGenAI, Type } from "@google/genai";
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+
+// --- Resilient Fetch Helper with Retries & Exponential Backoff ---
+const fetchWithRetry = async (url, options, retries = 3, backoff = 500) => {
+    try {
+        const response = await fetch(url, options);
+        // We retry on server errors (5xx) or network issues, but not on client errors (4xx).
+        if (!response.ok && response.status >= 500) {
+            throw new Error(`HTTP status ${response.status}`);
+        }
+        return response;
+    } catch (error) {
+        if (retries > 0) {
+            console.warn(`Fetch for "${url}" failed. Retrying in ${backoff}ms... (${retries} retries left)`);
+            await new Promise(resolve => setTimeout(resolve, backoff));
+            return fetchWithRetry(url, options, retries - 1, backoff * 2); // Exponential backoff
+        }
+        console.error(`Fetch failed for "${url}" after all retries.`);
+        throw error;
+    }
+};
+
+// A static list of cities with hardcoded coordinates to avoid repeated geocoding API calls.
+const COMPARISON_CITY_COORDS = [
+    { name: 'Cebu City', latitude: 10.3157, longitude: 123.8854 },
+    { name: 'Davao City', latitude: 7.1907, longitude: 125.4553 },
+    { name: 'Baguio', latitude: 16.4023, longitude: 120.5960 },
+    { name: 'Iloilo City', latitude: 10.7202, longitude: 122.5621 },
+    { name: 'Quezon City', latitude: 14.6760, longitude: 121.0437 },
+];
+
+const BREAKING_NEWS_KEYWORDS = [
+    'earthquake', 'typhoon', 'bongbong', 'marcos', 'inflation', 'flash flood',
+    'alert level', 'gunman', 'fire', 'confirmed', 'official', 'suspends',
+    'probe', 'investigation', 'crisis'
+];
+const NEWS_RSS_FEEDS = [
+    'https://newsinfo.inquirer.net/category/latest-stories/feed/',
+    'https://newsinfo.inquirer.net/category/metro/feed/'
+];
+const PROXY_URL = 'https://corsproxy.io/?';
+
+
+const fetchAndProcessNews = async () => {
+    const feedPromises = NEWS_RSS_FEEDS.map(feedUrl =>
+        fetchWithRetry(`${PROXY_URL}${encodeURIComponent(feedUrl)}`, undefined)
+        .then(response => {
+            return response.text();
+        })
+        .catch(error => {
+            console.error(`Failed to fetch news feed from ${feedUrl}:`, error);
+            return null; // Return null on failure
+        })
+    );
+
+    const feedResults = await Promise.all(feedPromises);
+
+    const allItems = new Map();
+    const parser = new DOMParser();
+
+    feedResults.forEach(xmlText => {
+        if (!xmlText) return;
+
+        const xmlDoc = parser.parseFromString(xmlText, 'application/xml');
+        const errorNode = xmlDoc.querySelector('parsererror');
+        if (errorNode) {
+            console.error("Error parsing XML:", errorNode);
+            return;
+        }
+
+        xmlDoc.querySelectorAll('item').forEach(item => {
+            const guid = item.querySelector('guid')?.textContent || item.querySelector('link')?.textContent;
+            if (guid && !allItems.has(guid)) {
+                const pubDateText = item.querySelector('pubDate')?.textContent;
+                allItems.set(guid, {
+                    title: item.querySelector('title')?.textContent || 'No title',
+                    pubDate: pubDateText ? new Date(pubDateText) : new Date(),
+                    guid: guid
+                });
+            }
+        });
+    });
+
+    const sortedItems = Array.from(allItems.values()).sort((a, b) => b.pubDate.getTime() - a.pubDate.getTime());
+
+    let breakingItem = null;
+    const now = new Date();
+    // 5 minutes ago - Tighter window for more immediate "breaking" news
+    const recencyThreshold = now.getTime() - (5 * 60 * 1000);
+
+    const potentialBreaking = sortedItems.find(item => {
+        if (item.pubDate.getTime() < recencyThreshold) {
+            return false; // Too old
+        }
+        const titleLower = item.title.toLowerCase();
+        return BREAKING_NEWS_KEYWORDS.some(keyword => titleLower.includes(keyword));
+    });
+
+    if (potentialBreaking) {
+        breakingItem = potentialBreaking;
+    }
+
+    const regularItems = sortedItems.filter(item => item.guid !== breakingItem?.guid);
+
+    return { breakingItem, regularItems };
+};
+
 
 // --- SVG Icons ---
 const Icon = ({ name, ...props }) => {
@@ -22,6 +128,7 @@ const Icon = ({ name, ...props }) => {
     'tide': <svg viewBox="0 0 24 24" fill="currentColor" {...props}><path d="M2.69,14.61C2.69,14.61,3,15,4,15c1,0,1-0.5,2-0.5s1,0.5,2,0.5s1-0.5,2-0.5s1,0.5,2,0.5s1-0.5,2-0.5 s1,0.5,2,0.5s1.31-0.39,1.31-0.39L20,16v-2l-2.69-1.39C17.31,12.39,17,12,16,12c-1,0-1,0.5-2,0.5s-1-0.5-2-0.5s-1,0.5-2,0.5 s-1-0.5-2-0.5s-1,0.5-2,0.5s-1.31-0.39-1.31-0.39L4,11V9l2.69,1.39C6.69,10.61,7,11,8,11c1,0,1-0.5,2-0.5s1,0.5,2,0.5 s1-0.5,2-0.5s1,0.5,2,0.5s1.31-0.39,1.31-0.39L20,10V8l-2.69-1.39c0,0-0.31-0.39-1.31-0.39c-1,0-1,0.5-2,0.5s-1-0.5-2-0.5 s-1,0.5-2,0.5s-1-0.5-2-0.5s-1,0.5-2,0.5C3,7,2.69,6.61,2.69,6.61L2,7v2l0.69,0.39C2.69,9.61,3,10,4,10c1,0,1-0.5,2-0.5 s1,0.5,2,0.5s-1-0.5-2-0.5s1,0.5,2,0.5s1-0.5,2-0.5s1.31,0.39,1.31,0.39L20,12v2l-0.69,0.39c0,0-0.31,0.39-1.31,0.39 c-1,0-1-0.5-2-0.5s-1,0.5-2,0.5s-1-0.5-2-0.5s-1,0.5-2,0.5s-1-0.5-2-0.5C3,14,2.69,14.39,2.69,14.39L2,15v2l0.69-0.39V14.61z"/></svg>,
     'refresh': <svg viewBox="0 0 24 24" fill="currentColor" {...props}><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>,
     'thunderstorm': <svg viewBox="0 0 24 24" fill="currentColor" {...props}><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13h4l-5.5 7v-5H8l5.5-7v5z"/></svg>,
+    'earthquake': <svg viewBox="0 0 24 24" fill="currentColor" {...props}><path d="M2,12L4.33,15.5L8.67,6.5L13,17.5L17.33,8.5L22,12H2Z"/></svg>,
   };
   return icons[name] || null;
 };
@@ -49,6 +156,26 @@ const getWmoDescription = (code) => {
     };
     return wmoMap[code] || 'varied conditions';
 };
+
+// --- Time formatting helper ---
+const formatTimeAgo = (timestamp) => {
+    const now = new Date();
+    const seconds = Math.floor((now.getTime() - timestamp) / 1000);
+
+    if (seconds < 60) return "Just now";
+    
+    let interval = seconds / 31536000;
+    if (interval > 1) return `${Math.floor(interval)} years ago`;
+    interval = seconds / 2592000;
+    if (interval > 1) return `${Math.floor(interval)} months ago`;
+    interval = seconds / 86400;
+    if (interval > 1) return `${Math.floor(interval)} days ago`;
+    interval = seconds / 3600;
+    if (interval > 1) return `${Math.floor(interval)} hours ago`;
+    interval = seconds / 60;
+    return `${Math.floor(interval)} minutes ago`;
+};
+
 
 const ForecastGraph = ({ data }) => {
     const { path, dots, labels } = useMemo(() => {
@@ -107,7 +234,6 @@ const ForecastGraph = ({ data }) => {
                 return `M ${point.x.toFixed(2)},${point.y.toFixed(2)}`;
             }
             // First control point (for the previous point)
-            // FIX: Added 'false' for the 'reverse' parameter to match the function signature.
             const [cpsX, cpsY] = controlPoint(a[i - 1], a[i - 2], point, false);
             // Second control point (for the current point)
             const [cpeX, cpeY] = controlPoint(point, a[i - 1], a[i + 1], true);
@@ -140,7 +266,7 @@ const ForecastGraph = ({ data }) => {
     );
 };
 
-const TideTable = ({ data, moonPhase }) => {
+const TideTable = ({ data, moonPhase, isLoading }) => {
     const upcomingEvents = useMemo(() => {
         if (!data || data.length === 0) return [];
         
@@ -162,29 +288,36 @@ const TideTable = ({ data, moonPhase }) => {
         return allEvents.filter(event => event.fullDate > now).slice(0, 4);
     }, [data]);
 
-    if (upcomingEvents.length === 0) {
-        return (
-            <section className="tide-table-section no-data">
-                <Icon name="tide" />
-                <span>Tide forecast unavailable</span>
-            </section>
-        );
-    }
-    
     return (
         <section className="tide-table-section">
             <h2 className="cell-title">Tide Forecast</h2>
-            <ul className="tide-list">
-                {upcomingEvents.map((event, index) => (
-                    <li key={index} className={`tide-event-item ${index === 0 ? 'next-event' : ''}`}>
-                        <span className="tide-event-details">
-                            <span className="tide-type">{event.type} Tide</span>
-                            <span className="tide-time">{event.time} - {event.day}</span>
-                        </span>
-                        <span className="tide-height">{event.height.toFixed(1)}M</span>
-                    </li>
-                ))}
-            </ul>
+            
+            {isLoading ? (
+                 <div className="tide-loading-container">
+                    <div className="loading-placeholder">
+                        <div className="loading-placeholder-text">Loading...</div>
+                        <div className="loading-placeholder-bar"><div className="loading-placeholder-shimmer"></div></div>
+                    </div>
+                </div>
+            ) : upcomingEvents.length > 0 ? (
+                 <ul className="tide-list">
+                    {upcomingEvents.map((event, index) => (
+                        <li key={index} className={`tide-event-item ${index === 0 ? 'next-event' : ''}`}>
+                            <span className="tide-event-details">
+                                <span className="tide-type">{event.type} Tide</span>
+                                <span className="tide-time">{event.time} - {event.day}</span>
+                            </span>
+                            <span className="tide-height">{event.height.toFixed(1)}M</span>
+                        </li>
+                    ))}
+                </ul>
+            ) : (
+                <div className="tide-list-unavailable">
+                    <Icon name="tide" />
+                    <span>Tide forecast unavailable</span>
+                </div>
+            )}
+           
              <div className="moon-phase-container">
                 <Icon name="moon" />
                 <span>{moonPhase?.toUpperCase()}</span>
@@ -193,12 +326,20 @@ const TideTable = ({ data, moonPhase }) => {
     );
 };
 
+
 const LocationModal = ({ isOpen, onClose, onLocationChange }) => {
     const [input, setInput] = useState('');
     const [suggestions, setSuggestions] = useState([]);
     const [isSuggesting, setIsSuggesting] = useState(false);
+    const [selectedLocation, setSelectedLocation] = useState(null);
+    const hasSelectedSuggestion = useRef(false);
     
     useEffect(() => {
+        if (hasSelectedSuggestion.current) {
+            hasSelectedSuggestion.current = false;
+            return;
+        }
+        
         const handler = setTimeout(() => {
             if (input.length > 2) {
                 fetchSuggestions(input);
@@ -212,8 +353,7 @@ const LocationModal = ({ isOpen, onClose, onLocationChange }) => {
     const fetchSuggestions = async (query) => {
         setIsSuggesting(true);
         try {
-            const response = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(query)}&count=5&format=json`);
-            if (!response.ok) throw new Error('Network response was not ok');
+            const response = await fetchWithRetry(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(query)}&count=5&format=json`, undefined);
             const data = await response.json();
             setSuggestions(data.results || []);
         } catch (error) {
@@ -225,15 +365,27 @@ const LocationModal = ({ isOpen, onClose, onLocationChange }) => {
     };
     
     const handleSelect = (suggestion) => {
-        setInput(suggestion.name);
+        const displayText = [suggestion.name, suggestion.admin1, suggestion.country].filter(Boolean).join(', ');
+        hasSelectedSuggestion.current = true;
+        setInput(displayText);
+        setSelectedLocation(suggestion);
         setSuggestions([]);
     };
     
     const handleSubmit = () => {
-        if (input.trim()) {
+        if (selectedLocation) {
+            // Pass object with display name and coordinates to bypass geocoding
+            onLocationChange({
+                name: input.trim(),
+                latitude: selectedLocation.latitude,
+                longitude: selectedLocation.longitude,
+                country: selectedLocation.country,
+            });
+        } else if (input.trim()) {
+            // Pass string for manual entry, which will be geocoded
             onLocationChange(input.trim());
-            onClose();
         }
+        onClose();
     };
 
     if (!isOpen) return null;
@@ -246,7 +398,10 @@ const LocationModal = ({ isOpen, onClose, onLocationChange }) => {
                     <input
                         type="text"
                         value={input}
-                        onChange={(e) => setInput(e.target.value)}
+                        onChange={(e) => {
+                           setInput(e.target.value);
+                           setSelectedLocation(null);
+                        }}
                         placeholder="e.g., Tokyo, Japan"
                         autoFocus
                     />
@@ -324,6 +479,195 @@ const AlertModal = ({ isOpen, onClose, lat, lon }) => {
     );
 };
 
+// --- New Earthquake Feature Components ---
+const fetchEarthquakeData = async (periodInDays = 1) => {
+    const endDate = new Date();
+    const startDate = new Date();
+    startDate.setDate(endDate.getDate() - periodInDays);
+
+    const formatISODate = (date) => date.toISOString().split('.')[0];
+
+    const params = new URLSearchParams({
+        format: 'geojson',
+        starttime: formatISODate(startDate),
+        endtime: formatISODate(endDate),
+        minlatitude: '4',
+        maxlatitude: '20',
+        minlongitude: '116',
+        maxlongitude: '128',
+        minmagnitude: '4.5',
+        orderby: 'time',
+        limit: '10', // Get the 10 most recent significant events
+    });
+
+    const url = `https://earthquake.usgs.gov/fdsnws/event/1/query?${params}`;
+
+    // --- Helpers for more reliable province lookup via geocoding the city name ---
+    const provinceCache = new Map();
+
+    const getCityFromPlace = (place) => {
+        if (!place) return null;
+        const parts = place.split(',').map(p => p.trim());
+        if (parts.length > 0) {
+            const firstPart = parts[0];
+            const ofMatch = firstPart.match(/of (.*)$/);
+            if (ofMatch && ofMatch[1]) {
+                return ofMatch[1].trim(); // e.g. "Santiago" from "91 km E of Santiago"
+            }
+            return firstPart.trim(); // e.g. "Mindanao" from "Mindanao, Philippines"
+        }
+        return null;
+    };
+
+    const getProvinceFromCity = async (city) => {
+        if (!city) return null;
+        if (provinceCache.has(city)) {
+            return provinceCache.get(city);
+        }
+        try {
+            const response = await fetchWithRetry(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}, Philippines&count=1&language=en&format=json`, undefined);
+            if (!response.ok) {
+                provinceCache.set(city, null);
+                return null;
+            }
+            const data = await response.json();
+            if (data.results && data.results.length > 0) {
+                // 'admin1' is usually the province or major administrative division.
+                const province = data.results[0].admin1 || null;
+                provinceCache.set(city, province);
+                return province;
+            }
+            provinceCache.set(city, null);
+            return null;
+        } catch (error) {
+            console.error(`Geocoding failed for city "${city}":`, error);
+            provinceCache.set(city, null);
+            return null;
+        }
+    };
+    
+    try {
+        const response = await fetchWithRetry(url, undefined);
+        if (!response.ok) {
+            throw new Error(`USGS API responded with status ${response.status}`);
+        }
+        const data = await response.json();
+        const features = data.features || [];
+        
+        const enhancedFeatures = await Promise.all(features.map(async (feature) => {
+            const originalPlace = feature.properties.place;
+            const city = getCityFromPlace(originalPlace);
+            const province = await getProvinceFromCity(city);
+            
+            let enhancedPlace = originalPlace;
+
+            if (province && !enhancedPlace.toLowerCase().includes(province.toLowerCase())) {
+                const parts = enhancedPlace.split(',').map(p => p.trim());
+                if (parts.length > 0 && parts[parts.length - 1].toLowerCase() === 'philippines') {
+                    parts.splice(parts.length - 1, 0, province);
+                    enhancedPlace = parts.join(', ');
+                }
+            }
+
+            return {
+                ...feature,
+                properties: { ...feature.properties, place: enhancedPlace },
+            };
+        }));
+        
+        return enhancedFeatures;
+        
+    } catch (error) {
+        console.error("Failed to fetch or process earthquake data:", error);
+        return [];
+    }
+};
+
+const EarthquakeAlert = ({ alertData }) => {
+    if (!alertData) {
+        return (
+            <div className="earthquake-alert all-clear">
+                <Icon name="earthquake" />
+                <span>SEISMIC STATUS: ALL CLEAR</span>
+            </div>
+        );
+    }
+    
+    const mag = alertData.properties.mag;
+    const isMajor = mag >= 6.0;
+    const alertClass = `earthquake-alert ${isMajor ? 'alert-active' : ''}`;
+    
+    return (
+        <div className={alertClass}>
+            <span>M{mag.toFixed(1)} EARTHQUAKE: {alertData.properties.place}</span>
+        </div>
+    );
+};
+
+const EarthquakeModal = ({ isOpen, onClose }) => {
+    const [filter, setFilter] = useState('day'); // 'day' or 'month'
+    const [earthquakes, setEarthquakes] = useState([]);
+    const [isLoading, setIsLoading] = useState(false);
+
+    useEffect(() => {
+        if (isOpen) {
+            const loadData = async () => {
+                setIsLoading(true);
+                const period = filter === 'day' ? 1 : 30;
+                const data = await fetchEarthquakeData(period);
+                setEarthquakes(data);
+                setIsLoading(false);
+            };
+            loadData();
+        }
+    }, [isOpen, filter]);
+
+    if (!isOpen) return null;
+
+    const getMagClass = (mag) => {
+        if (mag >= 6.0) return 'mag-high';
+        if (mag >= 5.0) return 'mag-medium';
+        return 'mag-low';
+    };
+
+    return (
+        <div className="modal-overlay" onClick={onClose}>
+            <div className="modal-content earthquake-modal-content" onClick={e => e.stopPropagation()}>
+                <h3>Recent Earthquakes</h3>
+                <div className="eq-filter-controls">
+                    <button className={filter === 'day' ? 'active' : ''} onClick={() => setFilter('day')}>Past 24 Hours</button>
+                    <button className={filter === 'month' ? 'active' : ''} onClick={() => setFilter('month')}>Past 30 Days</button>
+                </div>
+                <ul className="eq-list">
+                    {isLoading ? (
+                        <div className="eq-loading">Loading...</div>
+                    ) : earthquakes.length > 0 ? (
+                        earthquakes.map(eq => (
+                            <li key={eq.id} className="eq-item">
+                                <div className={`eq-magnitude ${getMagClass(eq.properties.mag)}`}>
+                                    <span>M</span>{eq.properties.mag.toFixed(1)}
+                                </div>
+                                <div className="eq-info">
+                                    <span className="eq-location">{eq.properties.place}</span>
+                                    <span className="eq-details">
+                                        Depth: {eq.geometry.coordinates[2].toFixed(1)} km &middot; {formatTimeAgo(eq.properties.time)}
+                                    </span>
+                                </div>
+                            </li>
+                        ))
+                    ) : (
+                        <div className="eq-none">No significant earthquakes recorded in this period.</div>
+                    )}
+                </ul>
+                <div className="modal-actions">
+                    <button onClick={onClose} className="btn-primary">Close</button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+
 const DarkModeToggle = ({ theme, toggleTheme }) => (
   <button 
     className="dark-mode-toggle" 
@@ -354,137 +698,83 @@ const getMoonPhase = (date = new Date()) => {
     return PHASES[index];
 };
 
-// --- Local Tide Simulation ---
-const generateTideData = () => {
-    const tidesByDate = {};
-    const baseDate = new Date();
-    baseDate.setHours(0, 0, 0, 0);
+const NewsTicker = ({ items }) => {
+    const [animationDuration, setAnimationDuration] = useState('90s');
+    const contentRef = useRef(null);
 
-    const baseHeight = 1.0;
-    const amplitude = 0.8;
-    const hoursInDay = 24;
-    const cycleHours = 12.4;
+    const hasContent = items && items.length > 0;
+    const tickerContent = useMemo(() => items.map(item => item.title).join(' • '), [items]);
 
-    for (let dayOffset = 0; dayOffset < 7; dayOffset++) {
-        const currentDate = new Date(baseDate.getTime() + dayOffset * 86400000);
-        const dateString = currentDate.toISOString().split('T')[0];
-        
-        tidesByDate[dateString] = {
-            day: currentDate.toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase(),
-            date: currentDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-            events: []
-        };
-        
-        for (let hour = 0; hour < hoursInDay; hour += 0.25) {
-            const totalHours = dayOffset * hoursInDay + hour;
-            const prevTotalHours = totalHours - 0.25;
-
-            const currentHeight = baseHeight + amplitude * Math.sin((totalHours / cycleHours) * 2 * Math.PI);
-            const prevHeight = baseHeight + amplitude * Math.sin((prevTotalHours / cycleHours) * 2 * Math.PI);
-            
-            const eventTime = new Date(currentDate.getTime());
-            eventTime.setHours(eventTime.getHours() + hour);
-
-            if (currentHeight > prevHeight && currentHeight > (baseHeight + amplitude * Math.sin(((totalHours + 0.25) / cycleHours) * 2 * Math.PI))) {
-                tidesByDate[dateString].events.push({
-                    type: 'High',
-                    time: eventTime,
-                    height: Math.max(0, currentHeight)
-                });
-            }
-            else if (currentHeight < prevHeight && currentHeight < (baseHeight + amplitude * Math.sin(((totalHours + 0.25) / cycleHours) * 2 * Math.PI))) {
-                 tidesByDate[dateString].events.push({
-                    type: 'Low',
-                    time: eventTime,
-                    height: Math.max(0, currentHeight)
-                });
+    useLayoutEffect(() => {
+        if (contentRef.current) {
+            const contentWidth = contentRef.current.offsetWidth / 2;
+            const pixelsPerSecond = 50; 
+            if (contentWidth > 0) {
+                const duration = contentWidth / pixelsPerSecond;
+                setAnimationDuration(`${duration.toFixed(2)}s`);
+            } else {
+                setAnimationDuration('0s');
             }
         }
-    }
-    return Object.values(tidesByDate);
-};
+    }, [tickerContent]);
 
-// --- Weather Summary Generator ---
-const generateWeatherSummary = (data) => {
-    const { hourly } = data;
-    const todayStartIndex = 24; 
-
-    if (!hourly?.time?.length || hourly.time.length < todayStartIndex + 24) {
-        return `Weather data from Open-Meteo.`;
-    }
-
-    const now = new Date();
-    const currentHour = now.getHours();
-    const currentIndex = todayStartIndex + currentHour;
-    
-    if (currentIndex >= hourly.time.length) {
-         return `Currently, you can expect ${getWmoDescription(hourly.weather_code[hourly.weather_code.length - 1])}.`;
-    }
-
-    const currentDesc = getWmoDescription(hourly.weather_code[currentIndex]);
-
-    let nextPeriodName = '';
-    let nextPeriodHour = -1;
-
-    if (currentHour < 12) {
-        nextPeriodName = 'this afternoon';
-        nextPeriodHour = 15;
-    } else if (currentHour < 18) {
-        nextPeriodName = 'this evening';
-        nextPeriodHour = 21;
-    } else {
-        nextPeriodName = 'overnight';
-        nextPeriodHour = 3;
-    }
-    
-    let nextPeriodIndex;
-    if (nextPeriodHour > currentHour) {
-        nextPeriodIndex = todayStartIndex + nextPeriodHour;
-    } else {
-        const tomorrowStartIndex = todayStartIndex + 24;
-        nextPeriodIndex = tomorrowStartIndex + nextPeriodHour;
-    }
-
-    if (nextPeriodIndex >= hourly.time.length) {
-        return `Currently, you can expect ${currentDesc}.`;
-    }
-
-    const nextPeriodDesc = getWmoDescription(hourly.weather_code[nextPeriodIndex]);
-    const remainingTodayTemps = hourly.apparent_temperature.slice(currentIndex, todayStartIndex + 24);
-    
-    let tempDesc = '';
-    if (remainingTodayTemps.length > 0) {
-        const maxFeelsLike = Math.round(Math.max(...remainingTodayTemps));
-        if (maxFeelsLike > 32) tempDesc = "hot";
-        else if (maxFeelsLike > 25) tempDesc = "warm";
-        else if (maxFeelsLike > 18) tempDesc = "mild";
-        else if (maxFeelsLike > 10) tempDesc = "cool";
-        else tempDesc = "cold";
-    }
-
-    let summary;
-    if (currentDesc === nextPeriodDesc) {
-        summary = `Expect ${currentDesc} to continue into ${nextPeriodName}, with ${tempDesc} conditions.`;
-    } else {
-        summary = `Currently seeing ${currentDesc}, transitioning to ${nextPeriodDesc} ${nextPeriodName}.`;
-    }
-
-    return summary.charAt(0).toUpperCase() + summary.slice(1);
-};
-
-
-const NewsTicker = ({ items }) => {
-    if (!items || items.length === 0) return null;
-    
-    const tickerText = items.map(item => item.title).join(' • ');
+    if (!hasContent) return null;
 
     return (
         <div className="news-ticker-container">
             <span className="news-ticker-label">LATEST NEWS</span>
             <div className="news-ticker-wrapper">
-                <div className="news-ticker-content">
-                    <span>{tickerText}</span>
-                    <span>{tickerText}</span>
+                <div
+                    className="news-ticker-content"
+                    key={tickerContent}
+                    ref={contentRef}
+                    style={{ animationDuration }}
+                >
+                    <span>{tickerContent}</span>
+                    <span>{tickerContent}</span>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+const BreakingNewsTicker = ({ item }) => {
+    const [animationDuration, setAnimationDuration] = useState('30s');
+    const contentRef = useRef(null);
+
+    const tickerContent = item.title;
+
+    useLayoutEffect(() => {
+        if (contentRef.current) {
+            // For the 'scroll-from-right' animation, the content travels a distance
+            // equivalent to its own width to enter the screen, and its own width again
+            // to exit, for a total of 2x its width.
+            const contentWidth = contentRef.current.offsetWidth; // Use the FULL width of the element
+            const pixelsPerSecond = 80; // Desired scroll speed
+
+            if (contentWidth > 0) {
+                // The animation's travel distance is from translateX(100%) to -translateX(100%), so 2 * contentWidth
+                const totalDistance = contentWidth * 2;
+                const duration = totalDistance / pixelsPerSecond;
+                setAnimationDuration(`${duration.toFixed(2)}s`);
+            } else {
+                setAnimationDuration('0s');
+            }
+        }
+    }, [tickerContent]);
+
+    return (
+        <div className="breaking-news-ticker">
+            <span className="news-ticker-label">BREAKING NEWS</span>
+            <div className="news-ticker-wrapper">
+                <div
+                    className="news-ticker-content"
+                    key={tickerContent}
+                    ref={contentRef}
+                    style={{ animationDuration }}
+                >
+                    <span>{tickerContent}</span>
+                    <span>{tickerContent}</span>
                 </div>
             </div>
         </div>
@@ -492,17 +782,36 @@ const NewsTicker = ({ items }) => {
 };
 
 
+const LoadingScreen = ({ message }) => (
+    <div className="loading-container">
+        <span>Loading Weather Data...</span>
+        <div className="progress-bar-container">
+             <div className="loading-placeholder-bar full-screen-loader">
+                <div className="loading-placeholder-shimmer"></div>
+            </div>
+        </div>
+        <span className="loading-status">{message}</span>
+    </div>
+);
+
+
 const App = () => {
     const [weatherData, setWeatherData] = useState(null);
     const [comparisonCities, setComparisonCities] = useState([]);
     const [newsItems, setNewsItems] = useState([]);
-    const [loading, setLoading] = useState(true);
+    const [breakingNews, setBreakingNews] = useState(null);
+    const [isInitialLoading, setIsInitialLoading] = useState(true);
+    const [isSummaryLoading, setIsSummaryLoading] = useState(true);
+    const [isTideLoading, setIsTideLoading] = useState(true);
+    const [loadingMessage, setLoadingMessage] = useState('Initializing...');
     const [error, setError] = useState(null);
     const [currentTime, setCurrentTime] = useState(new Date());
-    const [currentLocation, setCurrentLocation] = useState("Manila, Philippines");
+    const [currentLocation, setCurrentLocation] = useState({ name: "Manila, Philippines" });
     const [isLocationModalOpen, setIsLocationModalOpen] = useState(false);
     const [isHourlyModalOpen, setIsHourlyModalOpen] = useState(false);
     const [isAlertModalOpen, setIsAlertModalOpen] = useState(false);
+    const [isEarthquakeModalOpen, setIsEarthquakeModalOpen] = useState(false);
+    const [significantEarthquakeAlert, setSignificantEarthquakeAlert] = useState(null);
     const [severeWeatherAlert, setSevereWeatherAlert] = useState(null);
     const [locationCoords, setLocationCoords] = useState({ lat: null, lon: null });
     const [lastFetchTime, setLastFetchTime] = useState(null);
@@ -525,79 +834,94 @@ const App = () => {
         const timer = setInterval(() => setCurrentTime(new Date()), 60000);
         return () => clearInterval(timer);
     }, []);
-    
-    const fetchNewsData = useCallback(async () => {
-        try {
-            // Use Google Search grounding to get real-time news.
-            const response = await ai.models.generateContent({
-                model: "gemini-2.5-flash",
-                contents: "List the top 6 latest breaking news headlines in the Philippines. Please provide them as a numbered list.",
-                config: {
-                    tools: [{ googleSearch: {} }],
-                },
-            });
 
-            // Parse the plain text response.
-            const headlinesText = response.text;
-            const headlines = headlinesText
-                .split('\n')
-                .map(line => line.trim().replace(/^\d+\.\s*/, '')) // Remove numbering like "1. "
-                .filter(line => line.length > 0) // Filter out empty lines
-                .map(title => ({ title })); // Format for the NewsTicker component
-
-            if (headlines.length === 0) {
-              throw new Error("No headlines found in response.");
+    // Dedicated effect for high-frequency news fetching
+    useEffect(() => {
+        const updateNews = async () => {
+            try {
+                const { breakingItem, regularItems } = await fetchAndProcessNews();
+                setBreakingNews(breakingItem);
+                setNewsItems(regularItems);
+            } catch (error) {
+                console.error("Failed to update news:", error);
+                // Set a placeholder if news fails
+                setNewsItems([{ title: "News feed currently unavailable.", guid: 'error-msg' }]);
             }
-            
-            setNewsItems(headlines);
-        } catch (err) {
-            console.error("Failed to fetch news from Gemini with Search Grounding:", err);
-            setNewsItems([{ title: "News feed currently unavailable. Please try again later." }]);
-        }
+        };
+        
+        updateNews(); // Initial fetch
+        const newsInterval = setInterval(updateNews, 60000); // Fetch every 60 seconds
+        
+        return () => clearInterval(newsInterval);
     }, []);
 
-    const fetchWeatherData = useCallback(async (location) => {
-        setLoading(true);
+    // Dedicated effect for earthquake data fetching (every 5 mins)
+    useEffect(() => {
+        const checkEarthquakes = async () => {
+            const recentQuakes = await fetchEarthquakeData(1); // Check last 24 hours
+            if (recentQuakes.length > 0) {
+                // The API returns quakes sorted with the most recent first.
+                const mostRecentQuake = recentQuakes[0];
+                const quakeTime = mostRecentQuake.properties.time;
+                const now = new Date().getTime();
+                
+                // Set a 1-hour freshness threshold (3,600,000 milliseconds)
+                const freshnessThreshold = 3600 * 1000;
+
+                if ((now - quakeTime) < freshnessThreshold) {
+                    // The quake is fresh enough to be considered an active alert.
+                    setSignificantEarthquakeAlert(mostRecentQuake);
+                } else {
+                    // The most recent quake is too old, so we clear the alert.
+                    setSignificantEarthquakeAlert(null);
+                }
+            } else {
+                // No recent quakes found at all.
+                setSignificantEarthquakeAlert(null);
+            }
+        };
+
+        checkEarthquakes();
+        const eqInterval = setInterval(checkEarthquakes, 300000); // 5 minutes
+
+        return () => clearInterval(eqInterval);
+    }, []);
+
+    const fetchAllData = useCallback(async (locationDetails) => {
+        setIsInitialLoading(true);
+        setIsTideLoading(true);
+        setIsSummaryLoading(true);
         setError(null);
         setSevereWeatherAlert(null);
-        const fetchTimestamp = new Date(); // Capture timestamp at the start of the fetch attempt
+        const fetchTimestamp = new Date();
 
         try {
-            const fetchComparisonData = async () => {
-                const PHILIPPINE_CITIES = ['Cebu City', 'Davao City', 'Baguio', 'Iloilo City', 'Zamboanga', 'Legazpi'];
-                const NCR_CITIES = ['Quezon City', 'Makati', 'Pasig', 'Taguig', 'Mandaluyong'];
-                
-                const selectedProvincialCities = [...PHILIPPINE_CITIES].sort(() => 0.5 - Math.random()).slice(0, 3);
-                const selectedNcrCities = [...NCR_CITIES].sort(() => 0.5 - Math.random()).slice(0, 2);
-                const selectedCities = [...selectedProvincialCities, ...selectedNcrCities];
+            // --- 1. Geocoding ---
+            let latitude, longitude, city, country, timezone;
+            const locationName = locationDetails.name;
+            setLoadingMessage(`Resolving location for ${locationName}...`);
 
-                const promises = selectedCities.map(async (city) => {
-                    try {
-                        const geo = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&format=json`);
-                        const geoData = await geo.json();
-                        const { latitude, longitude, name } = geoData.results[0];
-                        const weather = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,weather_code`);
-                        const weatherData = await weather.json();
-                        return {
-                            name,
-                            temp: weatherData.current.temperature_2m,
-                            weatherCode: weatherData.current.weather_code,
-                        };
-                    } catch {
-                        return null;
-                    }
-                });
-                const results = (await Promise.all(promises)).filter(Boolean);
-                setComparisonCities(results);
-            };
-
-            const geoResponse = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(location)}&count=1&format=json`);
-            if (!geoResponse.ok) throw new Error('Failed to geocode location.');
-            const geoData = await geoResponse.json();
-            if (!geoData.results || geoData.results.length === 0) throw new Error(`Could not find location: ${location}`);
-            const { latitude, longitude, name: city, country, timezone } = geoData.results[0];
+            if (locationDetails.lat && locationDetails.lon) {
+                latitude = locationDetails.lat;
+                longitude = locationDetails.lon;
+                const nameParts = locationName.split(',').map(p => p.trim());
+                city = nameParts[0];
+                country = nameParts[nameParts.length - 1];
+            } else {
+                const geoResponse = await fetchWithRetry(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(locationName)}&count=1&format=json`, undefined);
+                const geoData = await geoResponse.json();
+                if (!geoData.results || geoData.results.length === 0) throw new Error(`Could not find location: ${locationName}`);
+                const result = geoData.results[0];
+                latitude = result.latitude;
+                longitude = result.longitude;
+                city = result.name;
+                country = result.country;
+                timezone = result.timezone;
+            }
             setLocationCoords({ lat: latitude, lon: longitude });
-
+           
+            // --- 2. Parallel Fast API Calls (Open-Meteo) ---
+            setLoadingMessage('Fetching standard weather forecasts...');
             const weather_params = new URLSearchParams({
                 latitude: String(latitude),
                 longitude: String(longitude),
@@ -609,67 +933,63 @@ const App = () => {
                 timezone: timezone || 'auto'
             });
             const weatherUrl = `https://api.open-meteo.com/v1/forecast?${weather_params}`;
-            
-            const [weatherResponse] = await Promise.all([
-                fetch(weatherUrl),
-                fetchComparisonData()
-            ]);
+            const weatherPromise = fetchWithRetry(weatherUrl, undefined).then(res => res.json());
 
-            if (!weatherResponse.ok) throw new Error('Failed to fetch weather data from Open-Meteo.');
-            const openMeteoData = await weatherResponse.json();
+            const comparisonPromise = Promise.all(COMPARISON_CITY_COORDS.map(async (city) => {
+                try {
+                    const res = await fetchWithRetry(`https://api.open-meteo.com/v1/forecast?latitude=${city.latitude}&longitude=${city.longitude}&current=temperature_2m,weather_code`, undefined);
+                    const data = await res.json();
+                    return { name: city.name, temp: data.current.temperature_2m, weatherCode: data.current.weather_code };
+                } catch (err) { 
+                    console.error(`Failed to fetch comparison data for ${city.name}`, err);
+                    return null; 
+                }
+            }));
 
-            const severeWeatherCodes = [99, 96, 95]; // Order of severity
+            const [openMeteoData, comparisonResults] = await Promise.all([weatherPromise, comparisonPromise]);
+
+            // --- 3. Process All CORE Data & Render UI---
+            setLoadingMessage('Finalizing and rendering...');
+            setComparisonCities(comparisonResults.filter(Boolean));
+
+            const severeWeatherCodes = [99, 96, 95];
             const next24hWeatherCodes = openMeteoData.hourly.weather_code.slice(24, 48);
             const mostSevereCode = severeWeatherCodes.find(code => next24hWeatherCodes.includes(code));
+            if (mostSevereCode) setSevereWeatherAlert(getWmoDescription(mostSevereCode));
 
-            if (mostSevereCode) {
-                let alertName = 'Severe Weather';
-                if (mostSevereCode === 99 || mostSevereCode === 96) {
-                    alertName = 'Hail Storm';
-                } else if (mostSevereCode === 95) {
-                    alertName = 'Thunderstorm';
-                }
-                setSevereWeatherAlert(alertName);
-            }
-            
-            const tideData = generateTideData();
-            const summaryText = generateWeatherSummary(openMeteoData);
-            
             const yesterdayMaxTemp = openMeteoData.daily.temperature_2m_max[0];
             const todayMaxTemp = openMeteoData.daily.temperature_2m_max[1];
             const tempDiff = todayMaxTemp - yesterdayMaxTemp;
-            let comparisonText;
+            let comparisonText = Math.abs(tempDiff) < 2 ? `Similar to yesterday` : `${Math.round(Math.abs(tempDiff))}° ${tempDiff > 0 ? 'warmer' : 'cooler'} than yesterday`;
 
-            if (Math.abs(tempDiff) < 2) {
-                comparisonText = `Similar to yesterday`;
-            } else if (tempDiff > 0) {
-                comparisonText = `${Math.round(tempDiff)}° warmer than yesterday`;
-            } else {
-                comparisonText = `${Math.round(Math.abs(tempDiff))}° cooler than yesterday`;
-            }
-            
-            const now = new Date();
-            const currentHour = now.getHours();
-            const todayStartIndex = 24; // API returns 1 past day
+            const currentHour = new Date().getHours();
+            const todayStartIndex = 24;
             const currentIndex = todayStartIndex + currentHour;
-
             const hourlyData = openMeteoData.hourly.time.slice(currentIndex, currentIndex + 24).map((time, i) => ({
                 time: new Date(time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }),
                 temp: Math.round(openMeteoData.hourly.temperature_2m[currentIndex + i]),
                 humidity: openMeteoData.hourly.relative_humidity_2m[currentIndex + i],
                 weatherCode: openMeteoData.hourly.weather_code[currentIndex + i],
             }));
+            
+            const fiveDayForecast = openMeteoData.daily.time.slice(1, 6).map((date, i) => ({
+                day: new Date(date).toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase(),
+                icon: getWeatherIcon(openMeteoData.daily.weather_code[i + 1]),
+                description: getWmoDescription(openMeteoData.daily.weather_code[i + 1]),
+                temp: openMeteoData.daily.temperature_2m_max[i + 1],
+                humidity: openMeteoData.daily.relative_humidity_2m_max[i + 1],
+            }));
 
-            const transformedData = {
+            const coreData = {
                 location: { city, country },
                 current: {
                     temp: openMeteoData.current.temperature_2m,
                     feelsLike: openMeteoData.current.apparent_temperature,
-                    summary: summaryText,
+                    summary: "", // Will be filled by Gemini
                     sunrise: new Date(openMeteoData.daily.sunrise[1]).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }),
                     sunset: new Date(openMeteoData.daily.sunset[1]).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }),
                     comparison: comparisonText,
-                    clothingSuggestion: openMeteoData.current.temperature_2m > 25 ? 'Light clothing advised' : 'Consider a light jacket',
+                    clothingSuggestion: "", // Will be filled by Gemini
                     humidity: openMeteoData.current.relative_humidity_2m,
                     windSpeed: openMeteoData.current.wind_speed_10m,
                 },
@@ -679,54 +999,165 @@ const App = () => {
                     highHumidity: openMeteoData.daily.relative_humidity_2m_max[1],
                     lowHumidity: openMeteoData.daily.relative_humidity_2m_min[1],
                 },
-                forecast: openMeteoData.daily.time.slice(1, 6).map((date, i) => ({
-                    day: new Date(date).toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase(),
-                    icon: openMeteoData.daily.weather_code[i + 1],
-                    temp: openMeteoData.daily.temperature_2m_max[i + 1],
-                    humidity: openMeteoData.daily.relative_humidity_2m_max[i + 1],
-                })),
+                forecast: fiveDayForecast,
                 hourly: hourlyData,
                 moonPhase: getMoonPhase(),
-                tideForecast: tideData
+                tideForecast: [], // Will be filled by Gemini
             };
 
-            setWeatherData(transformedData);
-            setLastFetchTime(fetchTimestamp); // Apply timestamp only on successful fetch
+            setWeatherData(coreData);
+            setLastFetchTime(fetchTimestamp);
+            setIsInitialLoading(false); // Hide main loading screen, show dashboard
+
+            // --- 4. Fetch Gemini Data in Background ---
+            const fetchTideData = async () => {
+                try {
+                    const tidePrompt = `List the next 4 upcoming high and low tide events for ${city}, ${country} (near lat ${latitude}, lon ${longitude}). Use Google Search for real-time data. Format each event on a new line, using a pipe (|) to separate the values. Do not add any other text or headers. The format must be: TYPE | TIME (e.g., 3:45 PM) | HEIGHT_METERS (e.g., 1.2)`;
+                    const tideResponse = await ai.models.generateContent({
+                        model: "gemini-2.5-flash",
+                        contents: tidePrompt,
+                        config: { tools: [{ googleSearch: {} }] },
+                    });
+                    const tideText = tideResponse.text;
+
+                    const tideEvents = [];
+                    if (tideText && !tideText.toLowerCase().includes("unavailable") && !tideText.toLowerCase().includes("inland")) {
+                        const lines = tideText.split('\n').filter(line => line.includes('|'));
+                        const now = new Date();
+                        for (const line of lines) {
+                            const parts = line.split('|').map(p => p.trim());
+                            if (parts.length === 3) {
+                                const [type, timeStr, heightStr] = parts;
+                                const height = parseFloat(heightStr);
+                                if ((type.toLowerCase().includes('high') || type.toLowerCase().includes('low')) && timeStr && !isNaN(height)) {
+                                    let [time, modifier] = timeStr.split(' ');
+                                    let [hours, minutes] = time.split(':').map(Number);
+                                    if (isNaN(hours) || isNaN(minutes)) continue;
+                                    if (modifier) {
+                                       if (modifier.toUpperCase() === 'PM' && hours < 12) hours += 12;
+                                       if (modifier.toUpperCase() === 'AM' && hours === 12) hours = 0;
+                                    }
+                                    const eventDate = new Date();
+                                    eventDate.setHours(hours, minutes, 0, 0);
+                                    if (tideEvents.length > 0 && eventDate.getTime() < tideEvents[tideEvents.length - 1].time.getTime()) {
+                                       eventDate.setDate(eventDate.getDate() + 1);
+                                    } else if (tideEvents.length === 0 && eventDate < now) {
+                                       eventDate.setDate(eventDate.getDate() + 1);
+                                    }
+                                    tideEvents.push({ type: type.charAt(0).toUpperCase() + type.slice(1).toLowerCase(), time: eventDate, height: height });
+                                }
+                            }
+                        }
+                    }
+                    const sortedTideEvents = tideEvents.sort((a, b) => a.time.getTime() - b.time.getTime()).slice(0, 4);
+                    const tideData = (sortedTideEvents || []).map(event => ({
+                        ...event,
+                        time: new Date(event.time),
+                        day: new Date(event.time).toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase(),
+                    })).reduce((acc, event) => {
+                        const dateString = event.time.toISOString().split('T')[0];
+                        if (!acc[dateString]) {
+                            acc[dateString] = { day: event.day, date: event.time.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), events: [] };
+                        }
+                        acc[dateString].events.push(event);
+                        return acc;
+                    }, {});
+                    
+                    setWeatherData(prev => ({ ...prev, tideForecast: Object.values(tideData) }));
+
+                } catch (err) {
+                    console.error("Failed to fetch tide data:", err);
+                    setWeatherData(prev => ({ ...prev, tideForecast: [] })); // Set empty on error
+                } finally {
+                    setIsTideLoading(false);
+                }
+            };
+            
+            const fetchSummaryData = async () => {
+                 try {
+                    const geminiPrompt = `
+                        Weather Data for ${city}, ${country}:
+                        - Current Temperature: ${Math.round(openMeteoData.current.temperature_2m)}°C
+                        - Feels Like: ${Math.round(openMeteoData.current.apparent_temperature)}°C
+                        - Today's High: ${Math.round(openMeteoData.daily.temperature_2m_max[1])}°C
+                        - Today's Low: ${Math.round(openMeteoData.daily.temperature_2m_min[1])}°C
+                        - Humidity: ${openMeteoData.current.relative_humidity_2m}%
+                        - Wind Speed: ${Math.round(openMeteoData.current.wind_speed_10m)} km/h
+                        - Conditions: ${getWmoDescription(openMeteoData.current.weather_code)}
+
+                        Based on this data, generate a JSON object with two keys:
+                        1. "summary": A short, conversational weather summary (around 20-30 words).
+                        2. "clothingSuggestion": A practical clothing suggestion (e.g., "A light jacket and jeans will be perfect.").
+                        `;
+                    const responseSchema = {
+                      type: Type.OBJECT,
+                      properties: {
+                        summary: { type: Type.STRING, description: "A short, conversational weather summary (around 20-30 words)." },
+                        clothingSuggestion: { type: Type.STRING, description: "A practical clothing suggestion (e.g., 'A light jacket and jeans will be perfect.')." },
+                      }
+                    };
+                    const geminiResponse = await ai.models.generateContent({
+                        model: "gemini-2.5-flash",
+                        contents: geminiPrompt,
+                        config: { 
+                            responseMimeType: "application/json", 
+                            responseSchema: responseSchema,
+                            thinkingConfig: { thinkingBudget: 0 }
+                        },
+                    });
+                    const geminiAPIData = JSON.parse(geminiResponse.text);
+                    setWeatherData(prev => ({
+                        ...prev,
+                        current: {
+                            ...prev.current,
+                            summary: geminiAPIData.summary,
+                            clothingSuggestion: geminiAPIData.clothingSuggestion
+                        }
+                    }));
+                 } catch(err) {
+                    console.error("Failed to fetch summary data:", err);
+                    setWeatherData(prev => ({
+                        ...prev,
+                        current: { ...prev.current, summary: "Weather summary is currently unavailable.", clothingSuggestion: "Check local conditions for clothing advice." }
+                    }));
+                 } finally {
+                    setIsSummaryLoading(false);
+                 }
+            };
+
+            fetchTideData();
+            fetchSummaryData();
 
         } catch (err) {
             console.error(err);
             setError("Failed to fetch weather data. Please check the location or try again later.");
-        } finally {
-            setLoading(false);
+            setIsInitialLoading(false);
         }
     }, []);
     
     useEffect(() => {
-        const fetchAllData = async () => {
-            await Promise.all([
-                fetchWeatherData(currentLocation),
-                fetchNewsData()
-            ]);
-        };
-
-        fetchAllData(); // Initial fetch
-        const intervalId = setInterval(fetchAllData, 900000); // Auto-refresh every 15 minutes
-
+        fetchAllData(currentLocation);
+        const intervalId = setInterval(() => fetchAllData(currentLocation), 900000); // Auto-refresh every 15 minutes
         return () => clearInterval(intervalId);
-    }, [currentLocation, fetchWeatherData, fetchNewsData]);
+    }, [currentLocation, fetchAllData]);
 
     const handleLocationChange = (newLocation) => {
-        setCurrentLocation(newLocation);
+        if (typeof newLocation === 'string') {
+            setCurrentLocation({ name: newLocation });
+        } else {
+            setCurrentLocation({
+                name: newLocation.name,
+                lat: newLocation.latitude,
+                lon: newLocation.longitude,
+            });
+        }
     };
     
-    const handleManualRefresh = async () => {
-         await Promise.all([
-            fetchWeatherData(currentLocation),
-            fetchNewsData()
-        ]);
+    const handleManualRefresh = () => {
+         fetchAllData(currentLocation);
     };
 
-    if (loading) return <div className="loading-container">Loading Weather Data...</div>;
+    if (isInitialLoading) return <LoadingScreen message={loadingMessage} />;
     if (error) return <div className="error-container">{error}</div>;
     if (!weatherData) return null;
     
@@ -735,29 +1166,48 @@ const App = () => {
     const lastUpdatedTime = lastFetchTime 
         ? `Updated: ${lastFetchTime.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}`
         : 'Updating...';
+        
+    const LoadingPlaceholder = ({ text, className = '' }) => (
+        <div className={`loading-placeholder ${className}`}>
+            <div className="loading-placeholder-text">{text}</div>
+            <div className="loading-placeholder-bar"><div className="loading-placeholder-shimmer"></div></div>
+        </div>
+    );
 
     return (
         <div className="dashboard">
             <LocationModal isOpen={isLocationModalOpen} onClose={() => setIsLocationModalOpen(false)} onLocationChange={handleLocationChange} />
             <HourlyForecastModal isOpen={isHourlyModalOpen} onClose={() => setIsHourlyModalOpen(false)} data={weatherData.hourly} />
             <AlertModal isOpen={isAlertModalOpen} onClose={() => setIsAlertModalOpen(false)} lat={locationCoords.lat} lon={locationCoords.lon} />
+            <EarthquakeModal isOpen={isEarthquakeModalOpen} onClose={() => setIsEarthquakeModalOpen(false)} />
 
             <header className="top-section">
                 <div className="header-main">
                     <div className="location-header">
-                        <h2>Today in {location?.city}</h2>
-                        <button className="edit-btn" onClick={() => setIsLocationModalOpen(true)} aria-label="Change location" title="Change Location">
+                        <h2>Today in {weatherData?.location?.city || currentLocation.name.split(',')[0].trim()}</h2>
+                    </div>
+                    <div className="header-actions">
+                        {severeWeatherAlert && (
+                            <button 
+                                className="alert-icon-btn" 
+                                onClick={() => setIsAlertModalOpen(true)}
+                                aria-label={severeWeatherAlert}
+                                title={`${severeWeatherAlert.charAt(0).toUpperCase() + severeWeatherAlert.slice(1)} Detected. Click for radar.`}
+                            >
+                                <Icon name="thunderstorm" />
+                            </button>
+                        )}
+                        <button className="earthquake-btn" onClick={() => setIsEarthquakeModalOpen(true)} aria-label="Show earthquake info" title="Earthquake Info">
+                            <Icon name="earthquake" />
+                        </button>
+                         <button className="edit-btn" onClick={() => setIsLocationModalOpen(true)} aria-label="Change location" title="Change Location">
                             <Icon name="edit" />
                         </button>
+                        <DarkModeToggle theme={theme} toggleTheme={toggleTheme} />
                     </div>
-                    <DarkModeToggle theme={theme} toggleTheme={toggleTheme} />
                 </div>
-
-                {severeWeatherAlert && (
-                    <button className="alert-button" onClick={() => setIsAlertModalOpen(true)}>
-                        {severeWeatherAlert} Detected
-                    </button>
-                )}
+                
+                <EarthquakeAlert alertData={significantEarthquakeAlert} />
                 
                 <div className="current-temp">
                     <h1>{Math.round(current?.temp ?? 0)}°</h1>
@@ -770,19 +1220,27 @@ const App = () => {
                     <div className="date-sun-group">
                         <span className="date-info">{formattedDate} &middot; {current?.comparison}</span>
                         <div className="sun-times">
-                            <span className="sun-time-item" title="Sunrise"><Icon name="sunrise" /> ↑{current?.sunrise}</span>
-                            <span className="sun-time-item" title="Sunset"><Icon name="sunset" /> ↓{current?.sunset}</span>
+                            <span className="sun-time-item" title="Sunrise"><Icon name="sunrise" /> ↑{'   '}{current?.sunrise}</span>
+                            <span className="sun-time-item" title="Sunset"><Icon name="sunset" /> ↓{'   '}{current?.sunset}</span>
                         </div>
                     </div>
                     <span className="feels-like">Feels like {Math.round(current?.feelsLike ?? 0)}°</span>
                 </div>
                 <div className="summary">
-                    <p>{current?.summary}</p>
+                   {isSummaryLoading ? (
+                        <LoadingPlaceholder text="Generating summary..." />
+                    ) : (
+                        <p>{current?.summary}</p>
+                    )}
                 </div>
                 <div className="clothing-suggestion">
-                    <div className="pill" title="Clothing Suggestion">
-                        <Icon name="shirt" /> {current?.clothingSuggestion}
-                    </div>
+                    {isSummaryLoading ? (
+                        <LoadingPlaceholder text="Thinking of an outfit..." />
+                     ) : (
+                        <div className="pill" title="Clothing Suggestion">
+                            <Icon name="shirt" /> {current?.clothingSuggestion}
+                        </div>
+                    )}
                 </div>
             </header>
 
@@ -818,7 +1276,7 @@ const App = () => {
                     <div className="forecast-list">
                         {forecast?.map(day => (
                             <div key={day.day} className="forecast-day">
-                                <span title={getWmoDescription(day.icon)}><Icon name={getWeatherIcon(day.icon)} /> {Math.round(day.temp)}°</span>
+                                <span title={day.description}><Icon name={getWeatherIcon(day.weatherCode)} /> {Math.round(day.temp)}°</span>
                                 <span className="forecast-humidity">{day.humidity ?? 0}%</span>
                                 <span>{day.day}</span>
                             </div>
@@ -826,7 +1284,7 @@ const App = () => {
                     </div>
                 </section>
                 <section className="grid-cell details-cell">
-                     <TideTable data={weatherData.tideForecast} moonPhase={moonPhase} />
+                     <TideTable data={weatherData.tideForecast} moonPhase={moonPhase} isLoading={isTideLoading} />
                 </section>
             </main>
             
@@ -846,6 +1304,7 @@ const App = () => {
             </section>
 
             <NewsTicker items={newsItems} />
+            {breakingNews && <BreakingNewsTicker item={breakingNews} />}
             
             <footer className="footer">
                 <div className="footer-details">
