@@ -1012,11 +1012,10 @@ const App = () => {
             // --- 4. Fetch Gemini Data in Background ---
             const fetchTideData = async () => {
                 try {
-                    const tidePrompt = `List the next 4 upcoming high and low tide events for ${city}, ${country} (near lat ${latitude}, lon ${longitude}). Use Google Search for real-time data. Format each event on a new line, using a pipe (|) to separate the values. Do not add any other text or headers. The format must be: TYPE | TIME (e.g., 3:45 PM) | HEIGHT_METERS (e.g., 1.2)`;
+                    const tidePrompt = `Provide the predicted next 4 upcoming high and low tide events for ${city}, ${country} (near lat ${latitude}, lon ${longitude}). Format each event on a new line, using a pipe (|) to separate the values. Do not add any other text or headers. The format must be: TYPE | TIME (e.g., 3:45 PM) | HEIGHT_METERS (e.g., 1.2)`;
                     const tideResponse = await ai.models.generateContent({
                         model: "gemini-2.5-flash",
                         contents: tidePrompt,
-                        config: { tools: [{ googleSearch: {} }] },
                     });
                     const tideText = tideResponse.text;
 
@@ -1185,6 +1184,9 @@ const App = () => {
                 <div className="header-main">
                     <div className="location-header">
                         <h2>Today in {weatherData?.location?.city || currentLocation.name.split(',')[0].trim()}</h2>
+                        <button className="edit-btn" onClick={() => setIsLocationModalOpen(true)} aria-label="Change location" title="Change Location">
+                            <Icon name="edit" />
+                        </button>
                     </div>
                     <div className="header-actions">
                         {severeWeatherAlert && (
@@ -1199,9 +1201,6 @@ const App = () => {
                         )}
                         <button className="earthquake-btn" onClick={() => setIsEarthquakeModalOpen(true)} aria-label="Show earthquake info" title="Earthquake Info">
                             <Icon name="earthquake" />
-                        </button>
-                         <button className="edit-btn" onClick={() => setIsLocationModalOpen(true)} aria-label="Change location" title="Change Location">
-                            <Icon name="edit" />
                         </button>
                         <DarkModeToggle theme={theme} toggleTheme={toggleTheme} />
                     </div>
