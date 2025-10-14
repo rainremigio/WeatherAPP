@@ -24,14 +24,46 @@ const fetchWithRetry = async (url, options, retries = 3, backoff = 500) => {
     }
 };
 
-// A static list of cities with hardcoded coordinates to avoid repeated geocoding API calls.
-const COMPARISON_CITY_COORDS = [
+// --- Dynamic City Selection for Philippine Outlook ---
+
+const PROVINCIAL_CITIES = [
     { name: 'Cebu City', latitude: 10.3157, longitude: 123.8854 },
     { name: 'Davao City', latitude: 7.1907, longitude: 125.4553 },
     { name: 'Baguio', latitude: 16.4023, longitude: 120.5960 },
     { name: 'Iloilo City', latitude: 10.7202, longitude: 122.5621 },
-    { name: 'Quezon City', latitude: 14.6760, longitude: 121.0437 },
+    { name: 'Zamboanga', latitude: 6.9214, longitude: 122.0790 },
+    { name: 'Cagayan de Oro', latitude: 8.4543, longitude: 124.6319 },
+    { name: 'Legazpi', latitude: 13.1391, longitude: 123.7438 },
+    { name: 'Puerto Princesa', latitude: 9.7392, longitude: 118.7354 },
+    { name: 'Bacolod', latitude: 10.6760, longitude: 122.9509 },
 ];
+
+const NCR_CITIES = [
+    { name: 'Manila', latitude: 14.5995, longitude: 120.9842 },
+    { name: 'Quezon City', latitude: 14.6760, longitude: 121.0437 },
+    { name: 'Makati', latitude: 14.5547, longitude: 121.0244 },
+    { name: 'Pasig', latitude: 14.5764, longitude: 121.0851 },
+    { name: 'Taguig', latitude: 14.5176, longitude: 121.0509 },
+];
+
+const shuffleArray = (array) => {
+  const newArray = [...array];
+  for (let i = newArray.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [newArray[i], newArray[j]] = [newArray[j], newArray[i]];
+  }
+  return newArray;
+};
+
+const selectRandomCities = () => {
+    const shuffledProvincial = shuffleArray(PROVINCIAL_CITIES);
+    const shuffledNcr = shuffleArray(NCR_CITIES);
+
+    const randomProvincial = shuffledProvincial.slice(0, 3);
+    const randomNcr = shuffledNcr.slice(0, 2);
+
+    return [...randomProvincial, ...randomNcr];
+};
 
 const BREAKING_NEWS_KEYWORDS = [
     'earthquake', 'typhoon', 'bongbong', 'marcos', 'inflation', 'flash flood',
@@ -266,7 +298,7 @@ const ForecastGraph = ({ data }) => {
     );
 };
 
-const TideTable = ({ data, moonPhase, isLoading }) => {
+const TideTable = ({ data, moonPhase, isLoading, error }) => {
     const upcomingEvents = useMemo(() => {
         if (!data || data.length === 0) return [];
         
@@ -298,6 +330,11 @@ const TideTable = ({ data, moonPhase, isLoading }) => {
                         <div className="loading-placeholder-text">Loading...</div>
                         <div className="loading-placeholder-bar"><div className="loading-placeholder-shimmer"></div></div>
                     </div>
+                </div>
+            ) : error ? (
+                <div className="tide-list-unavailable">
+                    <Icon name="tide" />
+                    <span>{error}</span>
                 </div>
             ) : upcomingEvents.length > 0 ? (
                  <ul className="tide-list">
@@ -583,23 +620,77 @@ const fetchEarthquakeData = async (periodInDays = 1) => {
     }
 };
 
-const EarthquakeAlert = ({ alertData }) => {
-    if (!alertData) {
-        return (
-            <div className="earthquake-alert all-clear">
-                <Icon name="earthquake" />
-                <span>SEISMIC STATUS: ALL CLEAR</span>
-            </div>
-        );
-    }
-    
-    const mag = alertData.properties.mag;
-    const isMajor = mag >= 6.0;
-    const alertClass = `earthquake-alert ${isMajor ? 'alert-active' : ''}`;
-    
+const WeatherAlertBar = ({ alertData }) => {
+    const [isShrunk, setIsShrunk] = useState(false);
+
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            setIsShrunk(!alertData);
+        }, 50);
+
+        return () => clearTimeout(timer);
+    }, [alertData]);
+
+    const alertClass = [
+        'weather-alert-bar',
+        !alertData ? 'all-clear' : 'alert-active',
+        isShrunk ? 'shrunk' : ''
+    ].filter(Boolean).join(' ');
+
+    const alertText = alertData ? `${alertData.toUpperCase()} ALERT` : 'WEATHER STATUS: ALL CLEAR';
+    const fullAlertText = alertData ? `Weather Alert: ${alertData}` : 'Weather Status: All Clear';
+
     return (
         <div className={alertClass}>
-            <span>M{mag.toFixed(1)} EARTHQUAKE: {alertData.properties.place}</span>
+            {!alertData ? (
+                <>
+                    <Icon name="thunderstorm" />
+                    <span>WEATHER STATUS: ALL CLEAR</span>
+                </>
+            ) : (
+                <>
+                    <Icon name="thunderstorm" />
+                    <span className="alert-bar-text" title={fullAlertText}>{alertText}</span>
+                </>
+            )}
+        </div>
+    );
+};
+
+const EarthquakeAlert = ({ alertData }) => {
+    const [isShrunk, setIsShrunk] = useState(false);
+
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            setIsShrunk(!alertData);
+        }, 50);
+
+        return () => clearTimeout(timer);
+    }, [alertData]);
+
+    const alertClass = [
+        'earthquake-alert',
+        !alertData ? 'all-clear' : 'alert-active',
+        isShrunk ? 'shrunk' : ''
+    ].filter(Boolean).join(' ');
+
+    const alertText = alertData 
+        ? `M${alertData.properties.mag.toFixed(1)} Earthquake detected in ${alertData.properties.place}` 
+        : 'SEISMIC STATUS: ALL CLEAR';
+
+    return (
+        <div className={alertClass}>
+            {!alertData ? (
+                <>
+                    <Icon name="earthquake" />
+                    <span>SEISMIC STATUS: ALL CLEAR</span>
+                </>
+            ) : (
+                <>
+                    <Icon name="earthquake" />
+                    <span className="alert-bar-text" title={alertText}>{alertText}</span>
+                </>
+            )}
         </div>
     );
 };
@@ -805,6 +896,8 @@ const App = () => {
     const [isTideLoading, setIsTideLoading] = useState(true);
     const [loadingMessage, setLoadingMessage] = useState('Initializing...');
     const [error, setError] = useState(null);
+    const [summaryError, setSummaryError] = useState(null);
+    const [tideError, setTideError] = useState(null);
     const [currentTime, setCurrentTime] = useState(new Date());
     const [currentLocation, setCurrentLocation] = useState({ name: "Manila, Philippines" });
     const [isLocationModalOpen, setIsLocationModalOpen] = useState(false);
@@ -892,6 +985,8 @@ const App = () => {
         setIsTideLoading(true);
         setIsSummaryLoading(true);
         setError(null);
+        setSummaryError(null);
+        setTideError(null);
         setSevereWeatherAlert(null);
         const fetchTimestamp = new Date();
 
@@ -935,7 +1030,8 @@ const App = () => {
             const weatherUrl = `https://api.open-meteo.com/v1/forecast?${weather_params}`;
             const weatherPromise = fetchWithRetry(weatherUrl, undefined).then(res => res.json());
 
-            const comparisonPromise = Promise.all(COMPARISON_CITY_COORDS.map(async (city) => {
+            const citiesForOutlook = selectRandomCities();
+            const comparisonPromise = Promise.all(citiesForOutlook.map(async (city) => {
                 try {
                     const res = await fetchWithRetry(`https://api.open-meteo.com/v1/forecast?latitude=${city.latitude}&longitude=${city.longitude}&current=temperature_2m,weather_code`, undefined);
                     const data = await res.json();
@@ -952,19 +1048,23 @@ const App = () => {
             setLoadingMessage('Finalizing and rendering...');
             setComparisonCities(comparisonResults.filter(Boolean));
 
-            const severeWeatherCodes = [99, 96, 95];
-            const next24hWeatherCodes = openMeteoData.hourly.weather_code.slice(24, 48);
-            const mostSevereCode = severeWeatherCodes.find(code => next24hWeatherCodes.includes(code));
-            if (mostSevereCode) setSevereWeatherAlert(getWmoDescription(mostSevereCode));
-
             const yesterdayMaxTemp = openMeteoData.daily.temperature_2m_max[0];
             const todayMaxTemp = openMeteoData.daily.temperature_2m_max[1];
             const tempDiff = todayMaxTemp - yesterdayMaxTemp;
             let comparisonText = Math.abs(tempDiff) < 2 ? `Similar to yesterday` : `${Math.round(Math.abs(tempDiff))}° ${tempDiff > 0 ? 'warmer' : 'cooler'} than yesterday`;
 
             const currentHour = new Date().getHours();
-            const todayStartIndex = 24;
+            const todayStartIndex = 24; // API provides 24 hours of past data
             const currentIndex = todayStartIndex + currentHour;
+
+            // Check for severe weather in the next 24 hours for the current city
+            const severeWeatherCodes = [99, 96, 95]; // Thunderstorm codes
+            const next24hWeatherCodes = openMeteoData.hourly.weather_code.slice(currentIndex, currentIndex + 24);
+            const mostSevereCode = severeWeatherCodes.find(code => next24hWeatherCodes.includes(code));
+            if (mostSevereCode) {
+                setSevereWeatherAlert(getWmoDescription(mostSevereCode));
+            }
+
             const hourlyData = openMeteoData.hourly.time.slice(currentIndex, currentIndex + 24).map((time, i) => ({
                 time: new Date(time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }),
                 temp: Math.round(openMeteoData.hourly.temperature_2m[currentIndex + i]),
@@ -1066,7 +1166,8 @@ const App = () => {
 
                 } catch (err) {
                     console.error("Failed to fetch tide data:", err);
-                    setWeatherData(prev => ({ ...prev, tideForecast: [] })); // Set empty on error
+                    setTideError("Could not retrieve tide data.");
+                    setWeatherData(prev => ({ ...prev, tideForecast: [] }));
                 } finally {
                     setIsTideLoading(false);
                 }
@@ -1075,17 +1176,17 @@ const App = () => {
             const fetchSummaryData = async () => {
                  try {
                     const geminiPrompt = `
-                        Weather Data for ${city}, ${country}:
-                        - Current Temperature: ${Math.round(openMeteoData.current.temperature_2m)}°C
-                        - Feels Like: ${Math.round(openMeteoData.current.apparent_temperature)}°C
-                        - Today's High: ${Math.round(openMeteoData.daily.temperature_2m_max[1])}°C
-                        - Today's Low: ${Math.round(openMeteoData.daily.temperature_2m_min[1])}°C
+                        Analyze the following weather data for ${city}, ${country} (all temperatures are in Celsius):
+                        - Current Temperature: ${Math.round(openMeteoData.current.temperature_2m)}
+                        - Feels Like: ${Math.round(openMeteoData.current.apparent_temperature)}
+                        - Today's High: ${Math.round(openMeteoData.daily.temperature_2m_max[1])}
+                        - Today's Low: ${Math.round(openMeteoData.daily.temperature_2m_min[1])}
                         - Humidity: ${openMeteoData.current.relative_humidity_2m}%
                         - Wind Speed: ${Math.round(openMeteoData.current.wind_speed_10m)} km/h
                         - Conditions: ${getWmoDescription(openMeteoData.current.weather_code)}
 
-                        Based on this data, generate a JSON object with two keys:
-                        1. "summary": A short, conversational weather summary (around 20-30 words).
+                        Generate a JSON object with two keys:
+                        1. "summary": A short, conversational weather summary (around 20-30 words). In the summary, when you mention a temperature, write it as a number followed immediately by "degC" (e.g., "32degC"). The summary must be plain text. CRITICAL: It must NOT contain phrases like "Please enable JavaScript", "Disqus", advertisements, or any other boilerplate text.
                         2. "clothingSuggestion": A practical clothing suggestion (e.g., "A light jacket and jeans will be perfect.").
                         `;
                     const responseSchema = {
@@ -1105,19 +1206,30 @@ const App = () => {
                         },
                     });
                     const geminiAPIData = JSON.parse(geminiResponse.text);
+
+                    // Safeguard to clean up the summary text from potential boilerplate and format temperature.
+                    const cleanSummary = (geminiAPIData.summary || '')
+                        .replace(/degC/gi, '°C') // Convert safe placeholder to degree symbol
+                        .replace(/Please enable JavaScript to view the comments powered by Disqus\. C,?/gi, '')
+                        .replace(/\s{2,}/g, ' ') // Replace multiple spaces with a single one.
+                        .trim();
+                        
+                    const cleanClothingSuggestion = (geminiAPIData.clothingSuggestion || '').replace(/degC/gi, '°C');
+
                     setWeatherData(prev => ({
                         ...prev,
                         current: {
                             ...prev.current,
-                            summary: geminiAPIData.summary,
-                            clothingSuggestion: geminiAPIData.clothingSuggestion
+                            summary: cleanSummary,
+                            clothingSuggestion: cleanClothingSuggestion,
                         }
                     }));
                  } catch(err) {
                     console.error("Failed to fetch summary data:", err);
+                    setSummaryError("Could not generate summary.");
                     setWeatherData(prev => ({
                         ...prev,
-                        current: { ...prev.current, summary: "Weather summary is currently unavailable.", clothingSuggestion: "Check local conditions for clothing advice." }
+                        current: { ...prev.current, summary: "", clothingSuggestion: "" }
                     }));
                  } finally {
                     setIsSummaryLoading(false);
@@ -1189,23 +1301,27 @@ const App = () => {
                         </button>
                     </div>
                     <div className="header-actions">
-                        {severeWeatherAlert && (
-                            <button 
-                                className="alert-icon-btn" 
-                                onClick={() => setIsAlertModalOpen(true)}
-                                aria-label={severeWeatherAlert}
-                                title={`${severeWeatherAlert.charAt(0).toUpperCase() + severeWeatherAlert.slice(1)} Detected. Click for radar.`}
-                            >
-                                <Icon name="thunderstorm" />
-                            </button>
-                        )}
-                        <button className="earthquake-btn" onClick={() => setIsEarthquakeModalOpen(true)} aria-label="Show earthquake info" title="Earthquake Info">
+                        <button 
+                            className={`weather-alert-btn ${severeWeatherAlert ? 'alert-active' : 'all-clear'}`}
+                            onClick={() => setIsAlertModalOpen(true)}
+                            aria-label="Show weather radar"
+                            title={severeWeatherAlert ? "Weather Alert Detected. Click for live radar." : "No active weather alerts"}
+                        >
+                            <Icon name="thunderstorm" />
+                        </button>
+                        <button 
+                            className={`earthquake-btn ${significantEarthquakeAlert ? 'alert-active' : 'all-clear'}`}
+                            onClick={() => setIsEarthquakeModalOpen(true)} 
+                            aria-label="Show earthquake info" 
+                            title={significantEarthquakeAlert ? "Significant Earthquake Detected. Click for details." : "No recent seismic alerts in the Philippines"}
+                        >
                             <Icon name="earthquake" />
                         </button>
                         <DarkModeToggle theme={theme} toggleTheme={toggleTheme} />
                     </div>
                 </div>
                 
+                <WeatherAlertBar alertData={severeWeatherAlert} />
                 <EarthquakeAlert alertData={significantEarthquakeAlert} />
                 
                 <div className="current-temp">
@@ -1228,6 +1344,8 @@ const App = () => {
                 <div className="summary">
                    {isSummaryLoading ? (
                         <LoadingPlaceholder text="Generating summary..." />
+                    ) : summaryError ? (
+                        <div className="inline-error">{summaryError}</div>
                     ) : (
                         <p>{current?.summary}</p>
                     )}
@@ -1235,6 +1353,8 @@ const App = () => {
                 <div className="clothing-suggestion">
                     {isSummaryLoading ? (
                         <LoadingPlaceholder text="Thinking of an outfit..." />
+                     ) : summaryError ? (
+                        <div className="inline-error">Outfit suggestion unavailable.</div>
                      ) : (
                         <div className="pill" title="Clothing Suggestion">
                             <Icon name="shirt" /> {current?.clothingSuggestion}
@@ -1283,7 +1403,7 @@ const App = () => {
                     </div>
                 </section>
                 <section className="grid-cell details-cell">
-                     <TideTable data={weatherData.tideForecast} moonPhase={moonPhase} isLoading={isTideLoading} />
+                     <TideTable data={weatherData.tideForecast} moonPhase={moonPhase} isLoading={isTideLoading} error={tideError} />
                 </section>
             </main>
             

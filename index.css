@@ -162,6 +162,7 @@ body {
   grid-template-areas:
     "location"
     "eq-alert"
+    "weather-alert"
     "temp-main"
     "details"
     "summary"
@@ -199,7 +200,7 @@ body {
   font-weight: 500;
 }
 
-.edit-btn, .earthquake-btn, .alert-icon-btn {
+.edit-btn, .earthquake-btn, .weather-alert-btn {
   background: var(--button-bg);
   border: 1px solid var(--button-border);
   border-radius: 50%;
@@ -212,22 +213,25 @@ body {
   transition: all 0.2s ease;
   color: var(--text-color);
 }
-.edit-btn:hover, .earthquake-btn:hover, .alert-icon-btn:hover {
+.edit-btn:hover, .earthquake-btn:hover, .weather-alert-btn:hover {
   transform: translateY(-1px);
   box-shadow: 0 2px 5px var(--button-shadow);
   border-color: var(--button-hover-border);
 }
-.edit-btn svg, .earthquake-btn svg, .alert-icon-btn svg {
+
+.weather-alert-btn.all-clear, .earthquake-btn.all-clear {
+    color: var(--eq-clear-bg);
+    animation: pulse-green 2s infinite;
+}
+.weather-alert-btn.alert-active, .earthquake-btn.alert-active {
+    color: var(--eq-alert-bg);
+    animation: pulse-red 2s infinite;
+}
+
+.edit-btn svg, .earthquake-btn svg, .weather-alert-btn svg {
   width: 16px;
   height: 16px;
   fill: currentColor;
-}
-
-.alert-icon-btn {
-    background-color: var(--alert-bg);
-    color: white;
-    border-color: var(--alert-bg);
-    animation: pulse-red 2s infinite;
 }
 
 .current-temp { 
@@ -681,6 +685,30 @@ body {
   }
 }
 
+@keyframes pulse-red {
+  0% {
+    box-shadow: 0 0 0 0 rgba(231, 76, 60, 0.7);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(231, 76, 60, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(231, 76, 60, 0);
+  }
+}
+
+@keyframes pulse-green {
+  0% {
+    box-shadow: 0 0 0 0 rgba(46, 204, 113, 0.7);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(46, 204, 113, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(46, 204, 113, 0);
+  }
+}
+
 .news-ticker-container, .breaking-news-ticker {
   display: flex;
   align-items: stretch;
@@ -1018,15 +1046,9 @@ body {
   overflow: hidden;
 }
 
-/* --- Earthquake Feature Styles --- */
-@keyframes pulse-red {
-  0% { box-shadow: 0 0 0 0 rgba(231, 76, 60, 0.7); }
-  70% { box-shadow: 0 0 0 10px rgba(231, 76, 60, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(231, 76, 60, 0); }
-}
-
+/* --- Alert Bar Styles (Weather & Earthquake) --- */
+.weather-alert-bar,
 .earthquake-alert {
-  grid-area: eq-alert;
   background-color: var(--eq-alert-bg);
   color: #fff;
   padding: 0.5rem;
@@ -1040,18 +1062,42 @@ body {
   gap: 0.5rem;
   font-family: system-ui, sans-serif;
   text-transform: uppercase;
+  max-width: 100%;
+  justify-self: center;
+  overflow: hidden;
+  white-space: nowrap;
+  margin-top: 0;
 }
+
+.weather-alert-bar { grid-area: weather-alert; }
+.earthquake-alert { grid-area: eq-alert; }
+
+.weather-alert-bar.shrunk,
+.earthquake-alert.shrunk {
+  max-width: 260px;
+  padding-top: 0.2rem;
+  padding-bottom: 0.2rem;
+  margin-top: -0.5rem; /* Counteract the mobile grid-gap */
+}
+
+.weather-alert-bar svg,
 .earthquake-alert svg {
     width: 16px;
     height: 16px;
 }
-.earthquake-alert.alert-active {
-  animation: pulse-red 2s infinite;
-}
+.weather-alert-bar.all-clear,
 .earthquake-alert.all-clear {
   background-color: var(--eq-clear-bg);
   opacity: 0.9;
 }
+
+.alert-bar-text {
+  min-width: 0; /* Allows the flex item to shrink below its content size */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .earthquake-modal-content {
   max-width: 500px;
   height: 90%;
@@ -1135,7 +1181,19 @@ body {
   color: var(--text-color-light);
 }
 
-/* --- TABLET & DESKTOåP STYLES (min-width: 768px) --- */
+.inline-error {
+  font-size: 0.8rem;
+  font-style: italic;
+  color: var(--eq-mag-high);
+  text-align: center;
+  padding: 0.5rem 0;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* --- TABLET & DESKTOP STYLES (min-width: 768px) --- */
 @media (min-width: 768px) {
   body {
     align-items: center; /* Re-center for larger screens */
@@ -1148,19 +1206,48 @@ body {
   }
   
   .top-section {
-    grid-template-columns: auto 1fr; /* Switch to two-column layout */
+    grid-template-columns: 2fr 1fr; /* Use a flexible ratio for robust sizing */
     grid-template-areas:
-      "location location"
-      "eq-alert eq-alert"
-      "temp-main details"
-      "summary summary"
-      "clothing clothing";
+      "location          actions"
+      "temp-main         weather-alert"
+      "temp-main         eq-alert"
+      "details           details"
+      "summary           summary"
+      "clothing          clothing";
     gap: 0.25rem 1.5rem;
-    text-align: left;
+    align-items: center; /* Vertically center items like the temp display */
   }
   
+  .header-main {
+      /* This is the key change: we make the container's children grid items themselves */
+      display: contents;
+  }
+
+  /* We can now place the children of .header-main into the new grid */
   .location-header {
-    justify-content: flex-start;
+      grid-area: location;
+  }
+
+  .header-actions {
+      grid-area: actions;
+      justify-self: end;
+  }
+  
+  .weather-alert-bar {
+      justify-self: stretch;
+  }
+  .earthquake-alert {
+    grid-area: eq-alert;
+    justify-self: stretch;
+  }
+  .current-temp { grid-area: temp-main; }
+  .weather-details { grid-area: details; }
+  .summary { grid-area: summary; }
+  .clothing-suggestion { grid-area: clothing; }
+
+  .weather-alert-bar.shrunk,
+  .earthquake-alert.shrunk {
+    margin-top: 0; /* Reset mobile margin fix */
   }
   
   .current-temp {
@@ -1185,6 +1272,11 @@ body {
 
   .summary, .clothing-suggestion {
     text-align: left;
+  }
+
+  .summary .inline-error, 
+  .clothing-suggestion .inline-error {
+    justify-content: flex-start;
   }
 
   .main-grid {
