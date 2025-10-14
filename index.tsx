@@ -1035,10 +1035,14 @@ const App = () => {
                 try {
                     const res = await fetchWithRetry(`https://api.open-meteo.com/v1/forecast?latitude=${city.latitude}&longitude=${city.longitude}&current=temperature_2m,weather_code`, undefined);
                     const data = await res.json();
-                    return { name: city.name, temp: data.current.temperature_2m, weatherCode: data.current.weather_code };
-                } catch (err) { 
+                    if (data && data.current) {
+                        return { name: city.name, temp: data.current.temperature_2m, weatherCode: data.current.weather_code };
+                    }
+                    console.warn(`Unexpected API response for comparison city ${city.name}:`, data);
+                    return null;
+                } catch (err) {
                     console.error(`Failed to fetch comparison data for ${city.name}`, err);
-                    return null; 
+                    return null;
                 }
             }));
 
