@@ -4,13 +4,23 @@ import { GoogleGenAI, Type } from "@google/genai";
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
+// --- Helper to identify rate limit errors from various APIs ---
+const isRateLimitError = (error) => {
+    if (!error || !error.message) return false;
+    const msg = error.message.toLowerCase();
+    // Check for common rate limit phrases from different APIs
+    return msg.includes('rate limit') || msg.includes('resource has been exhausted') || msg.includes('429');
+};
+
 // --- Resilient Fetch Helper with Retries & Exponential Backoff ---
 const fetchWithRetry = async (url, options, retries = 3, backoff = 500) => {
     try {
         const response = await fetch(url, options);
-        // We retry on server errors (5xx) or network issues, but not on client errors (4xx).
-        if (!response.ok && response.status >= 500) {
-            throw new Error(`HTTP status ${response.status}`);
+        if (!response.ok) {
+            // Retry on server errors (5xx) OR rate limit errors (429), but not other client errors.
+            if (response.status === 429 || response.status >= 500) {
+                 throw new Error(`HTTP status ${response.status}`);
+            }
         }
         return response;
     } catch (error) {
@@ -355,7 +365,8 @@ const LocationModal = ({ isOpen, onClose, onLocationChange }) => {
     const fetchSuggestions = async (query) => {
         setIsSuggesting(true);
         try {
-            const response = await fetchWithRetry(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(query)}&count=5&format=json`, undefined);
+            const searchString = `${query.trim()}, Philippines`;
+            const response = await fetchWithRetry(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(searchString)}&count=5&language=en&format=json`, undefined);
             const data = await response.json();
             setSuggestions(data.results || []);
         } catch (error) {
@@ -367,7 +378,7 @@ const LocationModal = ({ isOpen, onClose, onLocationChange }) => {
     };
     
     const handleSelect = (suggestion) => {
-        const displayText = [suggestion.name, suggestion.admin1, suggestion.country].filter(Boolean).join(', ');
+        const displayText = [suggestion.name, suggestion.admin2, suggestion.country].filter(Boolean).join(', ');
         hasSelectedSuggestion.current = true;
         setInput(displayText);
         setSelectedLocation(suggestion);
@@ -376,15 +387,18 @@ const LocationModal = ({ isOpen, onClose, onLocationChange }) => {
     
     const handleSubmit = () => {
         if (selectedLocation) {
-            // Pass object with display name and coordinates to bypass geocoding
+            // Pass a rich object with all available location details.
             onLocationChange({
-                name: input.trim(),
+                displayName: input.trim(),
+                city: selectedLocation.name,
+                admin1: selectedLocation.admin1,
+                admin2: selectedLocation.admin2,
+                country: selectedLocation.country,
                 latitude: selectedLocation.latitude,
                 longitude: selectedLocation.longitude,
-                country: selectedLocation.country,
             });
         } else if (input.trim()) {
-            // Pass string for manual entry, which will be geocoded
+            // Pass string for manual entry, which will be geocoded later.
             onLocationChange(input.trim());
         }
         onClose();
@@ -410,7 +424,7 @@ const LocationModal = ({ isOpen, onClose, onLocationChange }) => {
                     {suggestions.length > 0 && (
                         <ul className="suggestions-list">
                             {suggestions.map((s, i) => {
-                                const displayText = [s.name, s.admin1, s.country].filter(Boolean).join(', ');
+                                const displayText = [s.name, s.admin2, s.country].filter(Boolean).join(', ');
                                 return <li key={s.id || i} onClick={() => handleSelect(s)}>{displayText}</li>;
                             })}
                         </ul>
@@ -850,7 +864,7 @@ const LoadingScreen = ({ message }) => (
     </div>
 );
 
-const ClassSuspensionAlert = ({ status, isLoading, city }) => {
+const ClassSuspensionAlert = ({ status, isLoading }) => {
     if (isLoading) {
         return (
             <div className="class-suspension-alert loading">
@@ -860,15 +874,16 @@ const ClassSuspensionAlert = ({ status, isLoading, city }) => {
     }
 
     if (!status) return null;
+    
+    // Check if the status represents an error state
+    const isError = !status.active && (status.details.includes('Could not') || status.details.includes('Failed') || status.details.includes('Error') || status.details.includes('busy'));
 
     const alertClass = [
         'class-suspension-alert',
-        status.active ? 'alert-active' : 'all-clear'
+        isError ? 'error-state' : (status.active ? 'alert-active' : 'all-clear')
     ].join(' ');
-
-    const alertText = status.active
-        ? `WALANG PASOK: ${status.scope} in ${city}. Confirmed by ${status.source} on ${status.timestamp}.`
-        : `No Class Suspension for ${city}.`;
+    
+    const alertText = status.details;
 
     return (
         <div className={alertClass}>
@@ -891,7 +906,15 @@ const App = () => {
     const [summaryError, setSummaryError] = useState(null);
     const [tideError, setTideError] = useState(null);
     const [currentTime, setCurrentTime] = useState(new Date());
-    const [currentLocation, setCurrentLocation] = useState({ name: "Manila, Philippines" });
+    const [currentLocation, setCurrentLocation] = useState({
+        displayName: "Manila, Philippines",
+        city: "Manila",
+        admin1: "Metro Manila",
+        admin2: null,
+        country: "Philippines",
+        lat: 14.5995,
+        lon: 120.9842,
+    });
     const [isLocationModalOpen, setIsLocationModalOpen] = useState(false);
     const [isHourlyModalOpen, setIsHourlyModalOpen] = useState(false);
     const [isAlertModalOpen, setIsAlertModalOpen] = useState(false);
@@ -976,73 +999,107 @@ const App = () => {
     
     // Dedicated effect for class suspension checks
     useEffect(() => {
-        if (!currentLocation.name) return;
+        if (!currentLocation.displayName) return;
 
         const fetchSuspensionStatus = async () => {
             setIsSuspensionLoading(true);
             setSuspensionStatus(null);
-            
-            const dashboardCity = currentLocation.name;
-            const currentDate = new Date().toLocaleDateString('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit' }); // YYYY-MM-DD
+            const cityName = currentLocation.city || currentLocation.displayName.split(',')[0];
 
             try {
-                const prompt = `
-                Act as a Class Suspension Verification System for the Philippines.
-                My location is [DASHBOARD_CITY]: ${dashboardCity}.
-                Today's date is ${currentDate}.
+                // STAGE 1: Information Gathering with Google Search
+                let searchResultsText;
+                try {
+                    const provinceName = currentLocation.admin2; // e.g., "Laguna"
+                    const locationForPrompt = provinceName ? `${cityName}, ${provinceName}` : cityName;
+                    const currentDate = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 
-                Using Google Search, is there an *active* class suspension announcement for my location for today or tomorrow based on real-time official sources?
-
-                An announcement is *active* if:
-                - The suspension is for tomorrow.
-                - The suspension is for today, and it's before 6:00 AM local time.
-                - A PAGASA warning (Orange/Red Rainfall, or TCWS #1+) was issued for today for my location.
-
-                Check these sources in order of priority:
-                1. National (DILG, PCO, NDRRMC).
-                2. Weather (PAGASA).
-                3. Local (LGU for my city/province).
-
-                If you find an active suspension, respond in this exact format on a single line, with no extra text or explanation:
-                YES | [Level/Scope of Suspension] | [Name of Agency/Source] | [Date of announcement]
-
-                If you check all sources and find NO active suspension, respond with a single word, with no extra text or explanation:
-                NO
-                `;
-
-                const result = await ai.models.generateContent({
-                    model: "gemini-2.5-flash",
-                    contents: prompt,
-                    config: {
-                        tools: [{googleSearch: {}}],
-                    }
-                });
-                
-                const responseText = result.text.trim();
-                const parts = responseText.split('|').map(p => p.trim());
-
-                if (parts[0].toUpperCase() === 'YES' && parts.length >= 4) {
-                    setSuspensionStatus({
-                        active: true,
-                        scope: parts[1] || 'All Levels',
-                        source: parts[2] || 'Official Source',
-                        timestamp: parts[3] || 'Recent'
+                    const searchPrompt = `Using Google Search, find and summarize any official announcements about class suspensions in ${locationForPrompt} for today, ${currentDate}. Focus on government and major news sources.`;
+                    
+                    const searchResult = await ai.models.generateContent({
+                        model: "gemini-2.5-pro",
+                        contents: searchPrompt,
+                        config: { tools: [{ googleSearch: {} }] }
                     });
-                } else {
-                     setSuspensionStatus({ active: false });
+
+                    if (!searchResult || !searchResult.text) {
+                        throw new Error("Received empty search results.");
+                    }
+                    searchResultsText = searchResult.text;
+
+                } catch (searchError) {
+                    console.error("Suspension Check - Search API Call Failed:", searchError);
+                    if (isRateLimitError(searchError)) {
+                        throw new Error("Suspension check is temporarily busy");
+                    }
+                    throw new Error("Could not search for announcements");
                 }
 
-            } catch (error) {
-                console.error("Failed to fetch class suspension status:", error);
-                setSuspensionStatus({ active: false }); // Default to no suspension on error
+                // STAGE 2: Structuring the data with a second AI call
+                let structuredResponse;
+                try {
+                    const structurePrompt = `
+                        Analyze the following text and determine if there is an active class suspension for ${cityName} today.
+                        Text: "${searchResultsText}"
+
+                        Based *only* on the text provided, respond with a JSON object.
+                        - If the text confirms a suspension for ${cityName}: set "active" to true and "details" to a summary of the announcement (e.g., "#WalangPasok: All levels in ${currentLocation.admin2 || cityName} suspended...").
+                        - If the text indicates no announcements were found or the information is inconclusive: set "active" to false and "details" to "No Class Suspension for ${cityName}.".
+                    `;
+
+                    const responseSchema = {
+                        type: Type.OBJECT,
+                        properties: {
+                            active: { type: Type.BOOLEAN },
+                            details: { type: Type.STRING },
+                        },
+                        required: ["active", "details"],
+                    };
+
+                    const structureResult = await ai.models.generateContent({
+                        model: "gemini-2.5-flash",
+                        contents: structurePrompt,
+                        config: {
+                            responseMimeType: "application/json",
+                            responseSchema: responseSchema,
+                        }
+                    });
+                    
+                    structuredResponse = JSON.parse(structureResult.text);
+
+                } catch (structureError) {
+                    console.error("Suspension Check - Structuring API Call Failed:", structureError);
+                    // Graceful fallback: If structuring fails, just display the raw search result.
+                    // This provides the user with information, even if it's not perfectly formatted.
+                    setSuspensionStatus({
+                        active: false, // Treat as a non-alerting, informational message
+                        details: searchResultsText.length > 150 ? searchResultsText.substring(0, 147) + '...' : searchResultsText,
+                    });
+                    setIsSuspensionLoading(false); // End loading here for the fallback path
+                    return; // Exit the function after setting the fallback status
+                }
+
+                // STAGE 3: Success
+                setSuspensionStatus({
+                    active: structuredResponse.active,
+                    details: structuredResponse.details,
+                });
+
+            } catch (error) { // This will catch the re-thrown error from STAGE 1
+                console.error("Final error in fetchSuspensionStatus:", error.message);
+                setSuspensionStatus({
+                    active: false,
+                    details: `${error.message} for ${cityName}.`
+                });
             } finally {
                 setIsSuspensionLoading(false);
             }
         };
 
+
         fetchSuspensionStatus();
 
-    }, [currentLocation.name]);
+    }, [currentLocation.displayName, currentLocation.city, currentLocation.admin1, currentLocation.admin2, currentLocation.country]);
 
     const fetchAllData = useCallback(async (locationDetails) => {
         setIsInitialLoading(true);
@@ -1057,15 +1114,14 @@ const App = () => {
         try {
             // --- 1. Geocoding ---
             let latitude, longitude, city, country, timezone;
-            const locationName = locationDetails.name;
+            const locationName = locationDetails.displayName;
             setLoadingMessage(`Resolving location for ${locationName}...`);
 
-            if (locationDetails.lat && locationDetails.lon) {
+            if (locationDetails.lat && locationDetails.lon && locationDetails.city) {
                 latitude = locationDetails.lat;
                 longitude = locationDetails.lon;
-                const nameParts = locationName.split(',').map(p => p.trim());
-                city = nameParts[0];
-                country = nameParts[nameParts.length - 1];
+                city = locationDetails.city;
+                country = locationDetails.country;
             } else {
                 const geoResponse = await fetchWithRetry(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(locationName)}&count=1&format=json`, undefined);
                 const geoData = await geoResponse.json();
@@ -1076,6 +1132,17 @@ const App = () => {
                 city = result.name;
                 country = result.country;
                 timezone = result.timezone;
+
+                // CRITICAL: Update the app's state with the full resolved details
+                setCurrentLocation({
+                    displayName: [result.name, result.admin1, result.country].filter(Boolean).join(', '),
+                    city: result.name,
+                    admin1: result.admin1,
+                    admin2: result.admin2,
+                    country: result.country,
+                    lat: result.latitude,
+                    lon: result.longitude,
+                });
             }
             setLocationCoords({ lat: latitude, lon: longitude });
            
@@ -1162,45 +1229,51 @@ const App = () => {
 
             // --- 4. Fetch Gemini Data in Background ---
             const fetchTideData = async () => {
-                try {
-                    const tidePrompt = `Provide the predicted next 4 upcoming high and low tide events for ${city}, ${country} (near lat ${latitude}, lon ${longitude}). Format each event on a new line, using a pipe (|) to separate the values. Do not add any other text or headers. The format must be: TYPE | TIME (e.g., 3:45 PM) | HEIGHT_METERS (e.g., 1.2)`;
+                 try {
+                    const tidePrompt = `
+                        Provide the predicted upcoming high and low tide events for today and tomorrow for ${city}, ${country} (near lat ${latitude}, lon ${longitude}).
+                        Return a JSON array of objects. If tide data is not applicable for this location, return an empty array.
+                        Each object must have three keys:
+                        1. "type" (string, either "High" or "Low").
+                        2. "time" (string, in "YYYY-MM-DD HH:mm" 24-hour format and local timezone).
+                        3. "height" (number, in meters).
+                    `;
+
+                    const tideSchema = {
+                        type: Type.ARRAY,
+                        items: {
+                            type: Type.OBJECT,
+                            properties: {
+                                type: { type: Type.STRING },
+                                time: { type: Type.STRING },
+                                height: { type: Type.NUMBER },
+                            },
+                            required: ["type", "time", "height"],
+                        },
+                    };
+
                     const tideResponse = await ai.models.generateContent({
                         model: "gemini-2.5-flash",
                         contents: tidePrompt,
+                        config: {
+                            responseMimeType: "application/json",
+                            responseSchema: tideSchema,
+                        },
                     });
-                    const tideText = tideResponse.text;
 
-                    const tideEvents = [];
-                    if (tideText && !tideText.toLowerCase().includes("unavailable") && !tideText.toLowerCase().includes("inland")) {
-                        const lines = tideText.split('\n').filter(line => line.includes('|'));
-                        const now = new Date();
-                        for (const line of lines) {
-                            const parts = line.split('|').map(p => p.trim());
-                            if (parts.length === 3) {
-                                const [type, timeStr, heightStr] = parts;
-                                const height = parseFloat(heightStr);
-                                if ((type.toLowerCase().includes('high') || type.toLowerCase().includes('low')) && timeStr && !isNaN(height)) {
-                                    let [time, modifier] = timeStr.split(' ');
-                                    let [hours, minutes] = time.split(':').map(Number);
-                                    if (isNaN(hours) || isNaN(minutes)) continue;
-                                    if (modifier) {
-                                       if (modifier.toUpperCase() === 'PM' && hours < 12) hours += 12;
-                                       if (modifier.toUpperCase() === 'AM' && hours === 12) hours = 0;
-                                    }
-                                    const eventDate = new Date();
-                                    eventDate.setHours(hours, minutes, 0, 0);
-                                    if (tideEvents.length > 0 && eventDate.getTime() < tideEvents[tideEvents.length - 1].time.getTime()) {
-                                       eventDate.setDate(eventDate.getDate() + 1);
-                                    } else if (tideEvents.length === 0 && eventDate < now) {
-                                       eventDate.setDate(eventDate.getDate() + 1);
-                                    }
-                                    tideEvents.push({ type: type.charAt(0).toUpperCase() + type.slice(1).toLowerCase(), time: eventDate, height: height });
-                                }
-                            }
-                        }
+                    const tideAPIData = JSON.parse(tideResponse.text);
+
+                    if (!tideAPIData || !Array.isArray(tideAPIData) || tideAPIData.length === 0) {
+                        throw new Error("No tide events returned from API.");
                     }
-                    const sortedTideEvents = tideEvents.sort((a, b) => a.time.getTime() - b.time.getTime()).slice(0, 4);
-                    const tideData = (sortedTideEvents || []).map(event => ({
+                    
+                    const now = new Date();
+                    const tideEvents = tideAPIData
+                        .map(event => ({ ...event, time: new Date(event.time) }))
+                        .filter(event => event.time > now)
+                        .sort((a, b) => a.time.getTime() - b.time.getTime());
+
+                    const tideData = (tideEvents || []).map(event => ({
                         ...event,
                         time: new Date(event.time),
                         day: new Date(event.time).toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase(),
@@ -1216,8 +1289,12 @@ const App = () => {
                     setWeatherData(prev => ({ ...prev, tideForecast: Object.values(tideData) }));
 
                 } catch (err) {
-                    console.error("Failed to fetch tide data:", err);
-                    setTideError("Could not retrieve tide data.");
+                    console.error("Failed to fetch or process tide data:", err);
+                    if (isRateLimitError(err)) {
+                        setTideError("Tide forecast is temporarily busy. Please try again later.");
+                    } else {
+                        setTideError("Tide data is currently unavailable for this location.");
+                    }
                     setWeatherData(prev => ({ ...prev, tideForecast: [] }));
                 } finally {
                     setIsTideLoading(false);
@@ -1237,7 +1314,7 @@ const App = () => {
                         - Conditions: ${getWmoDescription(openMeteoData.current.weather_code)}
 
                         Generate a JSON object with two keys:
-                        1. "summary": A short, conversational weather summary (around 20-30 words). In the summary, when you mention a temperature, write it as a number followed immediately by "degC" (e.g., "32degC"). The summary must be plain text. CRITICAL: It must NOT contain phrases like "Please enable JavaScript", "Disqus", advertisements, or any other boilerplate text.
+                        1. "summary": A short, conversational weather summary (around 20-30 words). The summary must be plain text. CRITICAL: It must NOT contain any boilerplate, ads, or unrelated text.
                         2. "clothingSuggestion": A practical clothing suggestion (e.g., "A light jacket and jeans will be perfect.").
                         `;
                     const responseSchema = {
@@ -1245,27 +1322,35 @@ const App = () => {
                       properties: {
                         summary: { type: Type.STRING, description: "A short, conversational weather summary (around 20-30 words)." },
                         clothingSuggestion: { type: Type.STRING, description: "A practical clothing suggestion (e.g., 'A light jacket and jeans will be perfect.')." },
-                      }
+                      },
+                      required: ["summary", "clothingSuggestion"],
                     };
-                    const geminiResponse = await ai.models.generateContent({
-                        model: "gemini-2.5-flash",
-                        contents: geminiPrompt,
-                        config: { 
-                            responseMimeType: "application/json", 
-                            responseSchema: responseSchema,
-                            thinkingConfig: { thinkingBudget: 0 }
-                        },
-                    });
-                    const geminiAPIData = JSON.parse(geminiResponse.text);
+                    
+                    let geminiAPIData = null;
+                    try {
+                        const geminiResponse = await ai.models.generateContent({
+                            model: "gemini-2.5-flash",
+                            contents: geminiPrompt,
+                            config: { 
+                                responseMimeType: "application/json", 
+                                responseSchema: responseSchema,
+                            },
+                        });
+                        geminiAPIData = JSON.parse(geminiResponse.text);
+                    } catch (apiError) {
+                        console.error("Gemini summary API call or parsing failed:", apiError);
+                        if (isRateLimitError(apiError)) {
+                             throw new Error("Rate limit exceeded for summary API.");
+                        }
+                        throw new Error("API call failed to generate summary.");
+                    }
+                    
+                    if (!geminiAPIData || !geminiAPIData.summary || typeof geminiAPIData.summary !== 'string' || geminiAPIData.summary.trim() === '') {
+                        throw new Error("Received an invalid or empty summary from the API.");
+                    }
 
-                    // Safeguard to clean up the summary text from potential boilerplate and format temperature.
-                    const cleanSummary = (geminiAPIData.summary || '')
-                        .replace(/degC/gi, '°C') // Convert safe placeholder to degree symbol
-                        .replace(/Please enable JavaScript to view the comments powered by Disqus\. C,?/gi, '')
-                        .replace(/\s{2,}/g, ' ') // Replace multiple spaces with a single one.
-                        .trim();
-                        
-                    const cleanClothingSuggestion = (geminiAPIData.clothingSuggestion || '').replace(/degC/gi, '°C');
+                    const cleanSummary = geminiAPIData.summary.replace(/\s{2,}/g, ' ').trim();
+                    const cleanClothingSuggestion = geminiAPIData.clothingSuggestion || 'Light, comfortable clothing is a good choice.';
 
                     setWeatherData(prev => ({
                         ...prev,
@@ -1275,9 +1360,14 @@ const App = () => {
                             clothingSuggestion: cleanClothingSuggestion,
                         }
                     }));
+                    setSummaryError(null); // Clear any previous errors on success
                  } catch(err) {
                     console.error("Failed to fetch summary data:", err);
-                    setSummaryError("Could not generate summary.");
+                    if (isRateLimitError(err)) {
+                        setSummaryError("Summary generation is temporarily busy. Please try again later.");
+                    } else {
+                        setSummaryError("Could not generate weather summary.");
+                    }
                     setWeatherData(prev => ({
                         ...prev,
                         current: { ...prev.current, summary: "", clothingSuggestion: "" }
@@ -1351,6 +1441,9 @@ const App = () => {
 
             } catch (error) {
                 console.error("Failed to fetch regional outlook:", error);
+                 if (isRateLimitError(error)) {
+                    console.warn("Regional outlook failed due to rate limiting. Showing empty state.");
+                }
                 setComparisonCities([]); // Clear on error
             } finally {
                 setIsComparisonLoading(false);
@@ -1365,14 +1458,23 @@ const App = () => {
         fetchAllData(currentLocation);
         const intervalId = setInterval(() => fetchAllData(currentLocation), 900000); // Auto-refresh every 15 minutes
         return () => clearInterval(intervalId);
-    }, [currentLocation, fetchAllData]);
+    }, [currentLocation.displayName, fetchAllData]);
 
     const handleLocationChange = (newLocation) => {
         if (typeof newLocation === 'string') {
-            setCurrentLocation({ name: newLocation });
-        } else {
+            // Manual input: Reset detailed fields and let fetchAllData resolve them.
             setCurrentLocation({
-                name: newLocation.name,
+                displayName: newLocation,
+                city: null, admin1: null, admin2: null, country: null, lat: null, lon: null
+            });
+        } else {
+            // Selection from suggestions: We have all the data.
+            setCurrentLocation({
+                displayName: newLocation.displayName,
+                city: newLocation.city,
+                admin1: newLocation.admin1,
+                admin2: newLocation.admin2,
+                country: newLocation.country,
                 lat: newLocation.latitude,
                 lon: newLocation.longitude,
             });
@@ -1403,7 +1505,7 @@ const App = () => {
             <header className="top-section">
                 <div className="header-main">
                     <div className="location-header">
-                        <h2>Today in {weatherData?.location?.city || currentLocation.name.split(',')[0].trim()}</h2>
+                        <h2>Today in {currentLocation.displayName.split(',')[0].trim()}</h2>
                         <button className="edit-btn" onClick={() => setIsLocationModalOpen(true)} aria-label="Change location" title="Change Location">
                             <Icon name="edit" />
                         </button>
@@ -1432,7 +1534,6 @@ const App = () => {
                 <ClassSuspensionAlert 
                     isLoading={isSuspensionLoading} 
                     status={suspensionStatus}
-                    city={weatherData?.location?.city || currentLocation.name.split(',')[0].trim()}
                 />
                 <WeatherAlertBar alertData={severeWeatherAlert} />
                 <EarthquakeAlert alertData={significantEarthquakeAlert} />

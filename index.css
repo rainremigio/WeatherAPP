@@ -1160,6 +1160,14 @@ body {
     font-style: italic;
 }
 
+.class-suspension-alert.error-state {
+    background-color: transparent;
+    color: var(--eq-mag-high);
+    border: 1px dashed var(--eq-mag-high);
+    font-style: normal;
+    font-size: 0.75rem;
+}
+
 
 .earthquake-modal-content {
   max-width: 500px;
