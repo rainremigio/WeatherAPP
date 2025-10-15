@@ -161,6 +161,7 @@ body {
   grid-template-columns: 1fr; /* Single column for mobile */
   grid-template-areas:
     "location"
+    "suspension-alert"
     "eq-alert"
     "weather-alert"
     "temp-main"
@@ -669,6 +670,18 @@ body {
     font-size: 0.8rem;
 }
 
+.comparison-loading {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 70px; /* Give it some height */
+}
+
+.comparison-placeholder {
+    width: 100%;
+    max-width: 300px;
+}
+
 
 /* --- News Ticker --- */
 @keyframes scroll-left {
@@ -706,6 +719,18 @@ body {
   }
   100% {
     box-shadow: 0 0 0 0 rgba(46, 204, 113, 0);
+  }
+}
+
+@keyframes pulse-yellow {
+  0% {
+    box-shadow: 0 0 0 0 rgba(243, 156, 18, 0.7);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(243, 156, 18, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(243, 156, 18, 0);
   }
 }
 
@@ -1098,6 +1123,44 @@ body {
   white-space: nowrap;
 }
 
+/* --- Class Suspension Alert --- */
+.class-suspension-alert {
+    grid-area: suspension-alert;
+    padding: 0.6rem 0.5rem;
+    text-align: center;
+    font-weight: 500;
+    border-radius: 4px;
+    font-family: system-ui, sans-serif;
+    font-size: 0.8rem;
+    transition: all 0.3s ease;
+    min-height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.class-suspension-alert.loading .loading-placeholder {
+    width: 100%;
+    max-width: 300px;
+}
+.class-suspension-alert.loading .loading-placeholder-text {
+    text-align: center;
+}
+
+.class-suspension-alert.alert-active {
+    background-color: #f39c12; /* Orange */
+    color: #fff;
+    text-transform: uppercase;
+    animation: pulse-yellow 2s infinite;
+}
+
+.class-suspension-alert.all-clear {
+    background-color: transparent;
+    color: var(--text-color-light);
+    font-style: italic;
+}
+
+
 .earthquake-modal-content {
   max-width: 500px;
   height: 90%;
@@ -1209,6 +1272,7 @@ body {
     grid-template-columns: 2fr 1fr; /* Use a flexible ratio for robust sizing */
     grid-template-areas:
       "location          actions"
+      "suspension-alert  suspension-alert"
       "temp-main         weather-alert"
       "temp-main         eq-alert"
       "details           details"

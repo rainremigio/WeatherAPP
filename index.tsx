@@ -24,47 +24,6 @@ const fetchWithRetry = async (url, options, retries = 3, backoff = 500) => {
     }
 };
 
-// --- Dynamic City Selection for Philippine Outlook ---
-
-const PROVINCIAL_CITIES = [
-    { name: 'Cebu City', latitude: 10.3157, longitude: 123.8854 },
-    { name: 'Davao City', latitude: 7.1907, longitude: 125.4553 },
-    { name: 'Baguio', latitude: 16.4023, longitude: 120.5960 },
-    { name: 'Iloilo City', latitude: 10.7202, longitude: 122.5621 },
-    { name: 'Zamboanga', latitude: 6.9214, longitude: 122.0790 },
-    { name: 'Cagayan de Oro', latitude: 8.4543, longitude: 124.6319 },
-    { name: 'Legazpi', latitude: 13.1391, longitude: 123.7438 },
-    { name: 'Puerto Princesa', latitude: 9.7392, longitude: 118.7354 },
-    { name: 'Bacolod', latitude: 10.6760, longitude: 122.9509 },
-];
-
-const NCR_CITIES = [
-    { name: 'Manila', latitude: 14.5995, longitude: 120.9842 },
-    { name: 'Quezon City', latitude: 14.6760, longitude: 121.0437 },
-    { name: 'Makati', latitude: 14.5547, longitude: 121.0244 },
-    { name: 'Pasig', latitude: 14.5764, longitude: 121.0851 },
-    { name: 'Taguig', latitude: 14.5176, longitude: 121.0509 },
-];
-
-const shuffleArray = (array) => {
-  const newArray = [...array];
-  for (let i = newArray.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [newArray[i], newArray[j]] = [newArray[j], newArray[i]];
-  }
-  return newArray;
-};
-
-const selectRandomCities = () => {
-    const shuffledProvincial = shuffleArray(PROVINCIAL_CITIES);
-    const shuffledNcr = shuffleArray(NCR_CITIES);
-
-    const randomProvincial = shuffledProvincial.slice(0, 3);
-    const randomNcr = shuffledNcr.slice(0, 2);
-
-    return [...randomProvincial, ...randomNcr];
-};
-
 const BREAKING_NEWS_KEYWORDS = [
     'earthquake', 'typhoon', 'bongbong', 'marcos', 'inflation', 'flash flood',
     'alert level', 'gunman', 'fire', 'confirmed', 'official', 'suspends',
@@ -208,6 +167,12 @@ const formatTimeAgo = (timestamp) => {
     return `${Math.floor(interval)} minutes ago`;
 };
 
+const LoadingPlaceholder = ({ text, className = '' }) => (
+    <div className={`loading-placeholder ${className}`}>
+        <div className="loading-placeholder-text">{text}</div>
+        <div className="loading-placeholder-bar"><div className="loading-placeholder-shimmer"></div></div>
+    </div>
+);
 
 const ForecastGraph = ({ data }) => {
     const { path, dots, labels } = useMemo(() => {
@@ -885,10 +850,37 @@ const LoadingScreen = ({ message }) => (
     </div>
 );
 
+const ClassSuspensionAlert = ({ status, isLoading, city }) => {
+    if (isLoading) {
+        return (
+            <div className="class-suspension-alert loading">
+                <LoadingPlaceholder text="Checking for class suspension announcements..." />
+            </div>
+        );
+    }
+
+    if (!status) return null;
+
+    const alertClass = [
+        'class-suspension-alert',
+        status.active ? 'alert-active' : 'all-clear'
+    ].join(' ');
+
+    const alertText = status.active
+        ? `WALANG PASOK: ${status.scope} in ${city}. Confirmed by ${status.source} on ${status.timestamp}.`
+        : `No Class Suspension for ${city}.`;
+
+    return (
+        <div className={alertClass}>
+            <span>{alertText}</span>
+        </div>
+    );
+};
 
 const App = () => {
     const [weatherData, setWeatherData] = useState(null);
     const [comparisonCities, setComparisonCities] = useState([]);
+    const [isComparisonLoading, setIsComparisonLoading] = useState(true);
     const [newsItems, setNewsItems] = useState([]);
     const [breakingNews, setBreakingNews] = useState(null);
     const [isInitialLoading, setIsInitialLoading] = useState(true);
@@ -908,6 +900,8 @@ const App = () => {
     const [severeWeatherAlert, setSevereWeatherAlert] = useState(null);
     const [locationCoords, setLocationCoords] = useState({ lat: null, lon: null });
     const [lastFetchTime, setLastFetchTime] = useState(null);
+    const [suspensionStatus, setSuspensionStatus] = useState(null);
+    const [isSuspensionLoading, setIsSuspensionLoading] = useState(true);
     const [theme, setTheme] = useState(() => {
         const savedTheme = localStorage.getItem('theme');
         const userPrefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -979,6 +973,76 @@ const App = () => {
 
         return () => clearInterval(eqInterval);
     }, []);
+    
+    // Dedicated effect for class suspension checks
+    useEffect(() => {
+        if (!currentLocation.name) return;
+
+        const fetchSuspensionStatus = async () => {
+            setIsSuspensionLoading(true);
+            setSuspensionStatus(null);
+            
+            const dashboardCity = currentLocation.name;
+            const currentDate = new Date().toLocaleDateString('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit' }); // YYYY-MM-DD
+
+            try {
+                const prompt = `
+                Act as a Class Suspension Verification System for the Philippines.
+                My location is [DASHBOARD_CITY]: ${dashboardCity}.
+                Today's date is ${currentDate}.
+
+                Using Google Search, is there an *active* class suspension announcement for my location for today or tomorrow based on real-time official sources?
+
+                An announcement is *active* if:
+                - The suspension is for tomorrow.
+                - The suspension is for today, and it's before 6:00 AM local time.
+                - A PAGASA warning (Orange/Red Rainfall, or TCWS #1+) was issued for today for my location.
+
+                Check these sources in order of priority:
+                1. National (DILG, PCO, NDRRMC).
+                2. Weather (PAGASA).
+                3. Local (LGU for my city/province).
+
+                If you find an active suspension, respond in this exact format on a single line, with no extra text or explanation:
+                YES | [Level/Scope of Suspension] | [Name of Agency/Source] | [Date of announcement]
+
+                If you check all sources and find NO active suspension, respond with a single word, with no extra text or explanation:
+                NO
+                `;
+
+                const result = await ai.models.generateContent({
+                    model: "gemini-2.5-flash",
+                    contents: prompt,
+                    config: {
+                        tools: [{googleSearch: {}}],
+                    }
+                });
+                
+                const responseText = result.text.trim();
+                const parts = responseText.split('|').map(p => p.trim());
+
+                if (parts[0].toUpperCase() === 'YES' && parts.length >= 4) {
+                    setSuspensionStatus({
+                        active: true,
+                        scope: parts[1] || 'All Levels',
+                        source: parts[2] || 'Official Source',
+                        timestamp: parts[3] || 'Recent'
+                    });
+                } else {
+                     setSuspensionStatus({ active: false });
+                }
+
+            } catch (error) {
+                console.error("Failed to fetch class suspension status:", error);
+                setSuspensionStatus({ active: false }); // Default to no suspension on error
+            } finally {
+                setIsSuspensionLoading(false);
+            }
+        };
+
+        fetchSuspensionStatus();
+
+    }, [currentLocation.name]);
 
     const fetchAllData = useCallback(async (locationDetails) => {
         setIsInitialLoading(true);
@@ -1030,27 +1094,10 @@ const App = () => {
             const weatherUrl = `https://api.open-meteo.com/v1/forecast?${weather_params}`;
             const weatherPromise = fetchWithRetry(weatherUrl, undefined).then(res => res.json());
 
-            const citiesForOutlook = selectRandomCities();
-            const comparisonPromise = Promise.all(citiesForOutlook.map(async (city) => {
-                try {
-                    const res = await fetchWithRetry(`https://api.open-meteo.com/v1/forecast?latitude=${city.latitude}&longitude=${city.longitude}&current=temperature_2m,weather_code`, undefined);
-                    const data = await res.json();
-                    if (data && data.current) {
-                        return { name: city.name, temp: data.current.temperature_2m, weatherCode: data.current.weather_code };
-                    }
-                    console.warn(`Unexpected API response for comparison city ${city.name}:`, data);
-                    return null;
-                } catch (err) {
-                    console.error(`Failed to fetch comparison data for ${city.name}`, err);
-                    return null;
-                }
-            }));
-
-            const [openMeteoData, comparisonResults] = await Promise.all([weatherPromise, comparisonPromise]);
+            const openMeteoData = await weatherPromise;
 
             // --- 3. Process All CORE Data & Render UI---
             setLoadingMessage('Finalizing and rendering...');
-            setComparisonCities(comparisonResults.filter(Boolean));
 
             const yesterdayMaxTemp = openMeteoData.daily.temperature_2m_max[0];
             const todayMaxTemp = openMeteoData.daily.temperature_2m_max[1];
@@ -1250,6 +1297,70 @@ const App = () => {
         }
     }, []);
     
+    // --- Effect for fetching regional outlook based on current location ---
+    useEffect(() => {
+        if (!weatherData?.location?.city) {
+            return;
+        }
+
+        const fetchRegionalData = async () => {
+            setIsComparisonLoading(true);
+            try {
+                const { city, country } = weatherData.location;
+                
+                const prompt = `Based on the location of ${city}, ${country}, list 5 other major or notable cities in the same region. Do not include the original city in the list. The cities should be geographically diverse if possible. Provide the response as a JSON array of objects. Each object must have three keys: 'name' (string, e.g., 'Cebu City'), 'latitude' (number), and 'longitude' (number).`;
+
+                const regionalCitiesSchema = {
+                    type: Type.ARRAY,
+                    items: {
+                        type: Type.OBJECT,
+                        properties: {
+                            name: { type: Type.STRING },
+                            latitude: { type: Type.NUMBER },
+                            longitude: { type: Type.NUMBER },
+                        },
+                        required: ["name", "latitude", "longitude"],
+                    },
+                };
+                
+                const result = await ai.models.generateContent({
+                    model: "gemini-2.5-flash",
+                    contents: prompt,
+                    config: {
+                        responseMimeType: "application/json",
+                        responseSchema: regionalCitiesSchema,
+                    },
+                });
+                
+                const citiesForOutlook = JSON.parse(result.text);
+
+                const comparisonResults = await Promise.all(citiesForOutlook.map(async (city) => {
+                    try {
+                        const res = await fetchWithRetry(`https://api.open-meteo.com/v1/forecast?latitude=${city.latitude}&longitude=${city.longitude}&current=temperature_2m,weather_code`, undefined);
+                        const data = await res.json();
+                        if (data && data.current) {
+                            return { name: city.name, temp: data.current.temperature_2m, weatherCode: data.current.weather_code };
+                        }
+                        return null;
+                    } catch (err) {
+                        console.error(`Failed to fetch comparison data for ${city.name}`, err);
+                        return null;
+                    }
+                }));
+                setComparisonCities(comparisonResults.filter(Boolean));
+
+            } catch (error) {
+                console.error("Failed to fetch regional outlook:", error);
+                setComparisonCities([]); // Clear on error
+            } finally {
+                setIsComparisonLoading(false);
+            }
+        };
+
+        fetchRegionalData();
+
+    }, [weatherData?.location?.city, weatherData?.location?.country]);
+
     useEffect(() => {
         fetchAllData(currentLocation);
         const intervalId = setInterval(() => fetchAllData(currentLocation), 900000); // Auto-refresh every 15 minutes
@@ -1282,13 +1393,6 @@ const App = () => {
         ? `Updated: ${lastFetchTime.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}`
         : 'Updating...';
         
-    const LoadingPlaceholder = ({ text, className = '' }) => (
-        <div className={`loading-placeholder ${className}`}>
-            <div className="loading-placeholder-text">{text}</div>
-            <div className="loading-placeholder-bar"><div className="loading-placeholder-shimmer"></div></div>
-        </div>
-    );
-
     return (
         <div className="dashboard">
             <LocationModal isOpen={isLocationModalOpen} onClose={() => setIsLocationModalOpen(false)} onLocationChange={handleLocationChange} />
@@ -1325,6 +1429,11 @@ const App = () => {
                     </div>
                 </div>
                 
+                <ClassSuspensionAlert 
+                    isLoading={isSuspensionLoading} 
+                    status={suspensionStatus}
+                    city={weatherData?.location?.city || currentLocation.name.split(',')[0].trim()}
+                />
                 <WeatherAlertBar alertData={severeWeatherAlert} />
                 <EarthquakeAlert alertData={significantEarthquakeAlert} />
                 
@@ -1412,18 +1521,24 @@ const App = () => {
             </main>
             
             <section className="comparison-section">
-                <h2 className="cell-title">Philippine Outlook</h2>
-                <div className="comparison-cities-list">
-                    {comparisonCities.map(city => (
-                        <div key={city.name} className="comparison-city-item">
-                            <span className="city-name">{city.name}</span>
-                            <div title={getWmoDescription(city.weatherCode)}>
-                                <Icon name={getWeatherIcon(city.weatherCode)} />
+                <h2 className="cell-title">Regional Outlook</h2>
+                 {isComparisonLoading ? (
+                    <div className="comparison-loading">
+                         <LoadingPlaceholder text="Discovering regional cities..." className="comparison-placeholder"/>
+                    </div>
+                ) : comparisonCities.length > 0 ? (
+                    <div className="comparison-cities-list">
+                        {comparisonCities.map(city => (
+                            <div key={city.name} className="comparison-city-item">
+                                <span className="city-name">{city.name}</span>
+                                <div title={getWmoDescription(city.weatherCode)}>
+                                    <Icon name={getWeatherIcon(city.weatherCode)} />
+                                </div>
+                                <span className="city-temp">{Math.round(city.temp)}°</span>
                             </div>
-                            <span className="city-temp">{Math.round(city.temp)}°</span>
-                        </div>
-                    ))}
-                </div>
+                        ))}
+                    </div>
+                ) : null }
             </section>
 
             <NewsTicker items={newsItems} />
