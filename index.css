@@ -93,7 +93,7 @@ body {
   flex-direction: column;
   justify-content: center;
   align-items: center;
-  gap: 0.75rem;
+  gap: 1rem;
   width: 100%;
   min-height: 500px;
   background-color: var(--background-color);
@@ -104,6 +104,36 @@ body {
   padding: 2rem;
   color: var(--text-color);
 }
+
+.error-container h3 {
+  font-weight: 500;
+  color: var(--eq-mag-high); /* Use alert color */
+}
+
+.error-container p {
+  font-size: 0.9rem;
+  max-width: 80%;
+  line-height: 1.5;
+}
+
+.error-container button {
+  font-family: var(--font-family);
+  font-size: 0.9rem;
+  padding: 0.6rem 1.5rem;
+  border-radius: 4px;
+  border: 1px solid var(--button-border);
+  cursor: pointer;
+  background-color: var(--button-bg);
+  color: var(--text-color);
+  margin-top: 1rem;
+  transition: all 0.2s ease;
+}
+
+.error-container button:hover {
+  border-color: var(--button-hover-border);
+  transform: translateY(-1px);
+}
+
 
 .progress-bar-container {
     width: 80%;
@@ -429,7 +459,6 @@ body {
   display: flex;
   justify-content: space-between;
   text-align: center;
-  font-size: 0.7rem;
   padding-top: 0.5rem;
 }
 .forecast-day {
@@ -451,6 +480,11 @@ body {
 .forecast-humidity {
   font-size: 0.7rem;
   opacity: 0.8;
+}
+.forecast-date {
+  color: var(--text-color-light);
+  font-size: 0.7rem;
+  white-space: nowrap; /* Prevents the longer date string from wrapping */
 }
 
 .forecast-graph-wrapper {
@@ -979,6 +1013,14 @@ body {
 .suggestions-list li:hover {
   background-color: var(--suggestion-hover);
 }
+.suggestions-list li.suggestion-status {
+  color: var(--text-color-light);
+  font-style: italic;
+  cursor: default;
+}
+.suggestions-list li.suggestion-status:hover {
+  background-color: transparent;
+}
 .modal-actions {
   display: flex;
   justify-content: flex-end;
@@ -992,6 +1034,10 @@ body {
   border-radius: 4px;
   border: 1px solid var(--button-border);
   cursor: pointer;
+}
+.modal-actions button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 .btn-primary {
   background-color: var(--text-color);
@@ -1084,6 +1130,44 @@ body {
   overflow: hidden;
 }
 
+/* Suspension Details Modal Styles */
+.modal-content.suspension-details-modal {
+  max-width: 500px;
+}
+
+.suspension-details-content {
+  max-height: 60vh;
+  overflow-y: auto;
+  line-height: 1.6;
+  font-size: 0.9rem;
+  text-align: left;
+  padding-right: 0.5rem; /* For scrollbar space */
+}
+
+.suspension-source-link {
+  margin-top: 1.5rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border-color);
+  text-align: center;
+}
+
+.suspension-source-link a {
+  color: var(--text-color);
+  text-decoration: none;
+  font-weight: 500;
+  font-size: 0.8rem;
+  background-color: var(--button-bg);
+  padding: 0.5rem 1rem;
+  border-radius: 4px;
+  border: 1px solid var(--button-border);
+  transition: all 0.2s ease;
+}
+
+.suspension-source-link a:hover {
+  border-color: var(--button-hover-border);
+  box-shadow: 0 2px 5px var(--button-shadow);
+}
+
 /* --- Alert Bar Styles (Weather & Earthquake) --- */
 .weather-alert-bar,
 .earthquake-alert {
@@ -1150,6 +1234,7 @@ body {
     display: flex;
     align-items: center;
     justify-content: center;
+    gap: 0.5rem;
 }
 
 .class-suspension-alert.loading .loading-placeholder {
@@ -1181,6 +1266,23 @@ body {
     font-size: 0.75rem;
 }
 
+.btn-details {
+    background-color: rgba(255, 255, 255, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.5);
+    color: inherit; /* Inherits color from parent, so it's white on orange bg */
+    font-family: var(--font-family);
+    font-size: 0.7rem;
+    font-weight: 500;
+    padding: 0.2rem 0.6rem;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    flex-shrink: 0; /* Prevent the button from shrinking */
+}
+
+.btn-details:hover {
+    background-color: rgba(255, 255, 255, 0.3);
+}
 
 .earthquake-modal-content {
   max-width: 500px;
