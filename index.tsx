@@ -1236,11 +1236,12 @@ const App = () => {
 
             try {
                  const prompt = `
-                    Analyze official announcements for class suspensions ("Walang Pasok") in ${locationForPrompt}, Philippines for today, ${currentDate}.
-                    Focus only on official government (PAGASA, DepEd) and major news sources.
-                    Based on your findings, populate the fields in the provided JSON schema.
-                    - If a suspension is confirmed, set "suspension_confirmed" to true, provide a brief summary in "details", and include the direct URL to the source announcement in "source_url".
-                    - If no specific announcements are found, set "suspension_confirmed" to false, "details" to a confirmation message, and "source_url" to an empty string.
+                    As a Philippine public information officer, your critical task is to determine if there are any official class suspension announcements ("Walang Pasok") applicable to today's date, ${currentDate}, for the location of ${locationForPrompt}, Philippines.
+                    You MUST use real-time Google Search to find the most recent information from official government sources (like PAGASA, DepEd, local government units) and major, reputable news outlets.
+                    Populate all fields in the provided JSON schema based on your findings.
+                    - If an announcement covers a date range (e.g., "August 1-2"), provide both the start and end dates.
+                    - If it's for a single day, the start and end dates will be the same.
+                    - If, after a thorough search, you find no specific, active suspension announcement for today, you MUST set "is_suspension_active" to false and leave date fields empty.
                 `;
                 
                 const searchResult = await generateContentWithRateLimit({
@@ -1251,12 +1252,15 @@ const App = () => {
                         responseSchema: {
                             type: Type.OBJECT,
                             properties: {
-                                suspension_confirmed: { type: Type.BOOLEAN },
-                                details: { type: Type.STRING },
-                                source_url: { type: Type.STRING },
+                                is_suspension_active: { type: Type.BOOLEAN, description: "True if an active suspension is found for today's date." },
+                                details: { type: Type.STRING, description: "A brief summary of the suspension announcement." },
+                                source_url: { type: Type.STRING, description: "The direct URL to the official announcement." },
+                                start_date: { type: Type.STRING, description: "The start date of the suspension in YYYY-MM-DD format. Empty if none." },
+                                end_date: { type: Type.STRING, description: "The end date of the suspension in YYYY-MM-DD format. Empty if none." }
                             },
-                            required: ["suspension_confirmed", "details", "source_url"],
+                            required: ["is_suspension_active", "details", "source_url", "start_date", "end_date"],
                         },
+                        tools: [{ googleSearch: {} }],
                     },
                 });
 
@@ -1268,16 +1272,34 @@ const App = () => {
                     throw new Error("AI provided a response in an unreadable format.");
                 }
 
-                let newStatus;
-                if (typeof responseData.suspension_confirmed === 'boolean' && typeof responseData.details === 'string') {
-                     newStatus = {
-                        active: responseData.suspension_confirmed,
-                        details: responseData.suspension_confirmed ? responseData.details : `No Class Suspension for ${cityName}.`,
-                        sourceUrl: responseData.source_url || null,
-                    };
+                let suspensionIsActive = false;
+                // Prioritize date-based verification if dates are provided
+                if (responseData.start_date && responseData.end_date) {
+                    const today = new Date();
+                    today.setHours(0, 0, 0, 0); // Normalize to midnight for accurate date comparison
+
+                    const startDate = new Date(`${responseData.start_date}T00:00:00`);
+                    const endDate = new Date(`${responseData.end_date}T00:00:00`);
+
+                    // Check if dates from AI are valid
+                    if (!isNaN(startDate.getTime()) && !isNaN(endDate.getTime())) {
+                        if (today >= startDate && today <= endDate) {
+                            suspensionIsActive = true;
+                        }
+                    } else {
+                        // Fallback to AI's boolean if date parsing fails
+                        suspensionIsActive = responseData.is_suspension_active;
+                    }
                 } else {
-                    throw new Error("AI response was missing required fields.");
+                    // If no dates, rely solely on the AI's boolean assessment
+                    suspensionIsActive = responseData.is_suspension_active;
                 }
+                
+                const newStatus = {
+                    active: suspensionIsActive,
+                    details: suspensionIsActive ? responseData.details : `No Class Suspension for ${cityName}.`,
+                    sourceUrl: responseData.source_url || null,
+                };
                 
                 suspensionCache.set(locationForPrompt, { data: newStatus, timestamp: Date.now() });
                 setSuspensionStatus(newStatus);
@@ -1375,51 +1397,55 @@ const App = () => {
                  const geminiPrompt = `
                     Analyze the provided weather data for ${resolvedLoc.displayName}.
                     Your task is to act as an API. Use Google Search to find tide times.
-                    Your response must be ONLY a single, valid JSON object. Do not include markdown formatting, introductory text, or any other content outside of the JSON structure.
-
-                    The JSON object must adhere to this exact schema:
-                    {
-                        "summary": "string",
-                        "clothingSuggestion": "string",
-                        "tideForecast": [
-                            {"time": "string (ISO 8601 format, e.g., 'YYYY-MM-DDTHH:MM:SSZ')", "height": "number (in meters)", "type": "string ('High' or 'Low')"}
-                        ],
-                        "regionalOutlook": [
-                            {"name": "string (City Name)", "temp": "number (Celsius)", "condition": "string"}
-                        ]
-                    }
-
-                    Guidelines:
-                    - Summary: A concise, one-sentence weather narrative for the day.
-                    - Clothing Suggestion: A brief, practical outfit recommendation based on the weather.
-                    - Tide Forecast: Find tide times for the nearest major port to ${resolvedLoc.displayName} for the next 24 hours. Provide at least the next four high/low tide events. If no data is found, return an empty array.
-                    - Regional Outlook: Provide the current temperature and a one-word weather condition (e.g., 'Sunny', 'Cloudy', 'Rain') for three other major cities in the same region or island group as ${resolvedLoc.displayName}. If no data is found, return an empty array.
-
-                    Weather Data: ${JSON.stringify(openMeteo)}
+                    Your response must be ONLY a single, valid JSON object that adheres to the provided schema. Do not include markdown formatting, introductory text, or any other content outside of the JSON structure.
                 `;
                 
                 const geminiResponse = await generateContentWithRateLimit({
-                    model: "gemini-2.5-pro", // Using a more powerful model for better search and JSON formatting.
+                    model: "gemini-2.5-pro",
                     contents: geminiPrompt,
                     config: {
-                        tools: [{ googleSearch: {} }], // Can't be used with responseMimeType/responseSchema
+                        responseMimeType: "application/json",
+                        responseSchema: {
+                            type: Type.OBJECT,
+                            properties: {
+                                summary: { type: Type.STRING, description: "A concise, one-sentence weather narrative for the day." },
+                                clothingSuggestion: { type: Type.STRING, description: "A brief, practical outfit recommendation." },
+                                tideForecast: {
+                                    type: Type.ARRAY,
+                                    description: "Next 4 high/low tide events for the nearest major port. Empty if no data.",
+                                    items: {
+                                        type: Type.OBJECT,
+                                        properties: {
+                                            time: { type: Type.STRING, description: "ISO 8601 format, e.g., 'YYYY-MM-DDTHH:MM:SSZ'" },
+                                            height: { type: Type.NUMBER, description: "Height in meters" },
+                                            type: { type: Type.STRING, description: "'High' or 'Low'" }
+                                        },
+                                        required: ["time", "height", "type"]
+                                    }
+                                },
+                                regionalOutlook: {
+                                    type: Type.ARRAY,
+                                    description: "Weather for 3 other major cities in the same region. Empty if no data.",
+                                    items: {
+                                        type: Type.OBJECT,
+                                        properties: {
+                                            name: { type: Type.STRING, description: "City Name" },
+                                            temp: { type: Type.NUMBER, description: "Temperature in Celsius" },
+                                            condition: { type: Type.STRING, description: "One-word weather condition" }
+                                        },
+                                        required: ["name", "temp", "condition"]
+                                    }
+                                }
+                            },
+                            required: ["summary", "clothingSuggestion", "tideForecast", "regionalOutlook"]
+                        },
+                        tools: [{ googleSearch: {} }],
                     },
                 });
 
                 let geminiData;
                 try {
-                    // Clean the response text: remove markdown backticks and trim whitespace
-                    let cleanedText = geminiResponse.text.trim();
-                    if (cleanedText.startsWith("```json")) {
-                        cleanedText = cleanedText.substring(7);
-                    }
-                    if (cleanedText.startsWith("```")) {
-                        cleanedText = cleanedText.substring(3);
-                    }
-                    if (cleanedText.endsWith("```")) {
-                        cleanedText = cleanedText.slice(0, -3);
-                    }
-                    geminiData = JSON.parse(cleanedText);
+                    geminiData = JSON.parse(geminiResponse.text);
                 } catch (parseError) {
                     console.error("Failed to parse AI response as JSON:", parseError, "Response text:", geminiResponse.text);
                     throw new Error("The AI provided a response in an unreadable format.");
