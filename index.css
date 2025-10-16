@@ -681,6 +681,19 @@ body {
     width: 100%;
     max-width: 300px;
 }
+.comparison-section .inline-error.comparison-error {
+  text-align: center;
+  width: 100%;
+  padding: 1rem 0;
+}
+
+.comparison-none {
+  text-align: center;
+  padding: 1rem 0;
+  color: var(--text-color-light);
+  font-style: italic;
+  font-size: 0.8rem;
+}
 
 
 /* --- News Ticker --- */
