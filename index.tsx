@@ -1284,9 +1284,15 @@ const App = () => {
 
             } catch (error) {
                 console.error("Error in fetchSuspensionStatus:", error);
-                let errorMessage = `Could not check for announcements for ${cityName}.`;
+                let errorMessage;
                 if (isRateLimitError(error)) {
-                    errorMessage = `Suspension check is temporarily busy for ${cityName}.`;
+                    errorMessage = `Suspension check for ${cityName} is busy. Please try again shortly.`;
+                } else if (error.message.includes("unreadable format")) {
+                    errorMessage = `Error: The AI's response for ${cityName} was malformed.`;
+                } else if (error.message.includes("missing required fields")) {
+                    errorMessage = `Error: The AI's response for ${cityName} was incomplete.`;
+                } else {
+                    errorMessage = `Could not contact the AI service for ${cityName}'s announcements.`;
                 }
                 setSuspensionStatus({
                     active: false,
@@ -1480,17 +1486,17 @@ const App = () => {
 
             } catch (err) {
                 console.error("Failed to fetch or process Gemini enhancements:", err);
-                let errorMessage;
+                let detailMessage;
                 if (isRateLimitError(err)) {
-                    errorMessage = "AI features are busy due to high traffic.";
+                    detailMessage = "AI service is temporarily busy.";
                 } else if (err.message.includes("unreadable format")) {
-                    errorMessage = "AI response was malformed.";
+                    detailMessage = "AI response was malformed.";
                 } else {
-                    errorMessage = "Could not contact the AI service.";
+                    detailMessage = "Could not contact AI service.";
                 }
-                setSummaryError(errorMessage);
-                setTideError(errorMessage);
-                setComparisonError(errorMessage);
+                setSummaryError(`Summary: ${detailMessage}`);
+                setTideError(`Tide: ${detailMessage}`);
+                setComparisonError(`Outlook: ${detailMessage}`);
                 setWeatherData(prev => ({ ...prev, current: { ...prev.current, summary: "", clothingSuggestion: "" }, tideForecast: [] }));
                 setComparisonCities([]);
             } finally {
