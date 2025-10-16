@@ -254,6 +254,28 @@ const formatForecastDate = (dateString: string): string => {
     }
 };
 
+// --- Robust JSON extraction from AI text response ---
+const extractJsonFromString = (text: string): string | null => {
+    if (!text) return null;
+
+    // 1. Look for a JSON markdown block and extract its content.
+    const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
+    if (jsonMatch && jsonMatch[1]) {
+        return jsonMatch[1].trim();
+    }
+
+    // 2. If no markdown, find the first and last curly braces to isolate the JSON object.
+    // This handles cases where the AI might add introductory text before the JSON.
+    const firstBrace = text.indexOf('{');
+    const lastBrace = text.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+        return text.substring(firstBrace, lastBrace + 1).trim();
+    }
+
+    // 3. If all else fails, return the trimmed original string.
+    return text.trim();
+};
+
 const LoadingPlaceholder = ({ text, className = '' }) => (
     <div className={`loading-placeholder ${className}`}>
         <div className="loading-placeholder-text">{text}</div>
@@ -1238,35 +1260,36 @@ const App = () => {
                  const prompt = `
                     As a Philippine public information officer, your critical task is to determine if there are any official class suspension announcements ("Walang Pasok") applicable to today's date, ${currentDate}, for the location of ${locationForPrompt}, Philippines.
                     You MUST use real-time Google Search to find the most recent information from official government sources (like PAGASA, DepEd, local government units) and major, reputable news outlets.
-                    Populate all fields in the provided JSON schema based on your findings.
-                    - If an announcement covers a date range (e.g., "August 1-2"), provide both the start and end dates.
+
+                    Your response MUST be ONLY a single, valid JSON object. Do not include markdown formatting or any other text.
+                    The JSON object must have the following structure:
+                    {
+                      "is_suspension_active": boolean,
+                      "details": string,
+                      "source_url": string,
+                      "start_date": string,
+                      "end_date": string
+                    }
+
+                    - "start_date" and "end_date" should be in "YYYY-MM-DD" format, or an empty string if not applicable.
+                    - If an announcement covers a date range, provide both start and end dates.
                     - If it's for a single day, the start and end dates will be the same.
-                    - If, after a thorough search, you find no specific, active suspension announcement for today, you MUST set "is_suspension_active" to false and leave date fields empty.
+                    - If no active suspension is found, you MUST set "is_suspension_active" to false.
                 `;
                 
                 const searchResult = await generateContentWithRateLimit({
-                    model: "gemini-2.5-pro",
+                    model: "gemini-2.5-flash",
                     contents: prompt,
                     config: {
-                        responseMimeType: "application/json",
-                        responseSchema: {
-                            type: Type.OBJECT,
-                            properties: {
-                                is_suspension_active: { type: Type.BOOLEAN, description: "True if an active suspension is found for today's date." },
-                                details: { type: Type.STRING, description: "A brief summary of the suspension announcement." },
-                                source_url: { type: Type.STRING, description: "The direct URL to the official announcement." },
-                                start_date: { type: Type.STRING, description: "The start date of the suspension in YYYY-MM-DD format. Empty if none." },
-                                end_date: { type: Type.STRING, description: "The end date of the suspension in YYYY-MM-DD format. Empty if none." }
-                            },
-                            required: ["is_suspension_active", "details", "source_url", "start_date", "end_date"],
-                        },
                         tools: [{ googleSearch: {} }],
                     },
                 });
 
                 let responseData;
                  try {
-                    responseData = JSON.parse(searchResult.text);
+                    const cleanJsonString = extractJsonFromString(searchResult.text);
+                    if (!cleanJsonString) throw new Error("AI response was empty.");
+                    responseData = JSON.parse(cleanJsonString);
                 } catch (parseError) {
                     console.error("Failed to parse suspension status JSON:", parseError, "Response text:", searchResult.text);
                     throw new Error("AI provided a response in an unreadable format.");
@@ -1395,57 +1418,44 @@ const App = () => {
 
             try {
                  const geminiPrompt = `
-                    Analyze the provided weather data for ${resolvedLoc.displayName}.
-                    Your task is to act as an API. Use Google Search to find tide times.
-                    Your response must be ONLY a single, valid JSON object that adheres to the provided schema. Do not include markdown formatting, introductory text, or any other content outside of the JSON structure.
+                    Analyze the weather data for ${resolvedLoc.displayName}.
+                    Your task is to act as an API. You MUST use Google Search to find the tide times for the nearest major port.
+
+                    Your response must be ONLY a single, valid JSON object. Do not include markdown formatting, introductory text, or any other content.
+                    The JSON object must have the following structure:
+                    {
+                        "summary": "A concise, one-sentence weather narrative for the day.",
+                        "clothingSuggestion": "A brief, practical outfit recommendation.",
+                        "tideForecast": [
+                            {
+                                "time": "ISO 8601 format, e.g., 'YYYY-MM-DDTHH:MM:SSZ'",
+                                "height": 1.2,
+                                "type": "High"
+                            }
+                        ],
+                        "regionalOutlook": [
+                            {
+                                "name": "City Name",
+                                "temp": 28,
+                                "condition": "One-word weather condition"
+                            }
+                        ]
+                    }
                 `;
                 
                 const geminiResponse = await generateContentWithRateLimit({
-                    model: "gemini-2.5-pro",
+                    model: "gemini-2.5-flash",
                     contents: geminiPrompt,
                     config: {
-                        responseMimeType: "application/json",
-                        responseSchema: {
-                            type: Type.OBJECT,
-                            properties: {
-                                summary: { type: Type.STRING, description: "A concise, one-sentence weather narrative for the day." },
-                                clothingSuggestion: { type: Type.STRING, description: "A brief, practical outfit recommendation." },
-                                tideForecast: {
-                                    type: Type.ARRAY,
-                                    description: "Next 4 high/low tide events for the nearest major port. Empty if no data.",
-                                    items: {
-                                        type: Type.OBJECT,
-                                        properties: {
-                                            time: { type: Type.STRING, description: "ISO 8601 format, e.g., 'YYYY-MM-DDTHH:MM:SSZ'" },
-                                            height: { type: Type.NUMBER, description: "Height in meters" },
-                                            type: { type: Type.STRING, description: "'High' or 'Low'" }
-                                        },
-                                        required: ["time", "height", "type"]
-                                    }
-                                },
-                                regionalOutlook: {
-                                    type: Type.ARRAY,
-                                    description: "Weather for 3 other major cities in the same region. Empty if no data.",
-                                    items: {
-                                        type: Type.OBJECT,
-                                        properties: {
-                                            name: { type: Type.STRING, description: "City Name" },
-                                            temp: { type: Type.NUMBER, description: "Temperature in Celsius" },
-                                            condition: { type: Type.STRING, description: "One-word weather condition" }
-                                        },
-                                        required: ["name", "temp", "condition"]
-                                    }
-                                }
-                            },
-                            required: ["summary", "clothingSuggestion", "tideForecast", "regionalOutlook"]
-                        },
                         tools: [{ googleSearch: {} }],
                     },
                 });
 
                 let geminiData;
                 try {
-                    geminiData = JSON.parse(geminiResponse.text);
+                    const cleanJsonString = extractJsonFromString(geminiResponse.text);
+                    if (!cleanJsonString) throw new Error("AI response was empty.");
+                    geminiData = JSON.parse(cleanJsonString);
                 } catch (parseError) {
                     console.error("Failed to parse AI response as JSON:", parseError, "Response text:", geminiResponse.text);
                     throw new Error("The AI provided a response in an unreadable format.");
