@@ -84,6 +84,11 @@ const NEWS_RSS_FEEDS = [
 ];
 const PROXY_URL = 'https://corsproxy.io/?';
 
+// --- Helper Function for Robust XML Parsing ---
+const getNodeTextByXPath = (xpath, contextNode, doc) => {
+    const result = doc.evaluate(xpath, contextNode, null, XPathResult.STRING_TYPE, null);
+    return result.stringValue.trim();
+};
 
 const fetchAndProcessNews = async () => {
     const feedPromises = NEWS_RSS_FEEDS.map(feedUrl =>
@@ -112,32 +117,41 @@ const fetchAndProcessNews = async () => {
             return;
         }
 
-        xmlDoc.querySelectorAll('item').forEach(item => {
-            const guid = item.querySelector('guid')?.textContent || item.querySelector('link')?.textContent;
+        const itemNodes = xmlDoc.evaluate('//item', xmlDoc, null, XPathResult.ORDERED_NODE_ITERATOR_TYPE, null);
+        let currentItemNode;
+        while ((currentItemNode = itemNodes.iterateNext())) {
+            const guid = getNodeTextByXPath("string(*[local-name()='guid'])", currentItemNode, xmlDoc) || getNodeTextByXPath("string(*[local-name()='link'])", currentItemNode, xmlDoc);
+
             if (guid && !allItems.has(guid)) {
-                const pubDateText = item.querySelector('pubDate')?.textContent;
+                const title = getNodeTextByXPath("string(*[local-name()='title'])", currentItemNode, xmlDoc) || 'No title';
+                const pubDateText = getNodeTextByXPath("string(*[local-name()='pubDate'])", currentItemNode, xmlDoc);
+
                 allItems.set(guid, {
-                    title: item.querySelector('title')?.textContent || 'No title',
+                    title: title,
                     pubDate: pubDateText ? new Date(pubDateText) : new Date(),
                     guid: guid
                 });
             }
-        });
+        }
     });
 
     const sortedItems = Array.from(allItems.values()).sort((a, b) => b.pubDate.getTime() - a.pubDate.getTime());
 
     let breakingItem = null;
     const now = new Date();
-    // 5 minutes ago - Tighter window for more immediate "breaking" news
-    const recencyThreshold = now.getTime() - (5 * 60 * 1000);
+    // 15 minutes ago - Tighter window for more immediate "breaking" news
+    const recencyThreshold = now.getTime() - (15 * 60 * 1000);
 
     const potentialBreaking = sortedItems.find(item => {
         if (item.pubDate.getTime() < recencyThreshold) {
             return false; // Too old
         }
-        const titleLower = item.title.toLowerCase();
-        return BREAKING_NEWS_KEYWORDS.some(keyword => titleLower.includes(keyword));
+
+        // Create a RegExp once, joining all keywords with '|' (OR operator) and using \b for word boundaries
+        const breakingNewsRegex = new RegExp(`\\b(${BREAKING_NEWS_KEYWORDS.join('|')})\\b`, 'i');
+
+        // Test the title against the combined, boundary-enforced regex
+        return breakingNewsRegex.test(item.title);
     });
 
     if (potentialBreaking) {
