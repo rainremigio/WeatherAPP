@@ -1235,28 +1235,34 @@ const App = () => {
             }
 
             try {
-                const prompt = `
-                    Using Google Search, find official announcements about class suspensions ("Walang Pasok") in ${locationForPrompt}, Philippines for today, ${currentDate}.
+                 const prompt = `
+                    Analyze official announcements for class suspensions ("Walang Pasok") in ${locationForPrompt}, Philippines for today, ${currentDate}.
                     Focus only on official government (PAGASA, DepEd) and major news sources.
-                    Your response MUST be ONLY a single, valid JSON object, with no other text or markdown formatting.
-                    The JSON object must have these exact keys: "suspension_confirmed" (boolean), "details" (string), and "source_url" (string or null).
-                    - If a suspension is confirmed, set "suspension_confirmed" to true, provide a brief summary of the announcement in "details", and include the direct URL to the source announcement in "source_url".
-                    - If no specific announcements are found, set "suspension_confirmed" to false, "details" to a confirmation message, and "source_url" to null.
+                    Based on your findings, populate the fields in the provided JSON schema.
+                    - If a suspension is confirmed, set "suspension_confirmed" to true, provide a brief summary in "details", and include the direct URL to the source announcement in "source_url".
+                    - If no specific announcements are found, set "suspension_confirmed" to false, "details" to a confirmation message, and "source_url" to an empty string.
                 `;
-
+                
                 const searchResult = await generateContentWithRateLimit({
                     model: "gemini-2.5-pro",
                     contents: prompt,
-                    config: { tools: [{ googleSearch: {} }] }
+                    config: {
+                        responseMimeType: "application/json",
+                        responseSchema: {
+                            type: Type.OBJECT,
+                            properties: {
+                                suspension_confirmed: { type: Type.BOOLEAN },
+                                details: { type: Type.STRING },
+                                source_url: { type: Type.STRING },
+                            },
+                            required: ["suspension_confirmed", "details", "source_url"],
+                        },
+                    },
                 });
 
                 let responseData;
                  try {
-                    let cleanedText = searchResult.text.trim();
-                    if (cleanedText.startsWith("```json")) cleanedText = cleanedText.substring(7);
-                    if (cleanedText.startsWith("```")) cleanedText = cleanedText.substring(3);
-                    if (cleanedText.endsWith("```")) cleanedText = cleanedText.slice(0, -3);
-                    responseData = JSON.parse(cleanedText);
+                    responseData = JSON.parse(searchResult.text);
                 } catch (parseError) {
                     console.error("Failed to parse suspension status JSON:", parseError, "Response text:", searchResult.text);
                     throw new Error("AI provided a response in an unreadable format.");
