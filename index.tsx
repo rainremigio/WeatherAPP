@@ -17,22 +17,9 @@ const isRateLimitError = (error) => {
     return msg.includes('rate limit') || msg.includes('resource has been exhausted') || msg.includes('429') || msg.includes('resource_exhausted');
 };
 
-// --- Rate Limiter & Backoff Wrapper for Gemini API ---
-let lastGeminiApiCallTimestamp = 0;
-const MIN_GEMINI_INTERVAL = 4000; // 4 seconds to stay well under 15 RPM for gemini-flash
-
+// --- Resilient Gemini API Caller with Backoff ---
 const generateContentWithRateLimit = async (params, retries = 3, backoff = 1000) => {
-    const now = Date.now();
-    const timeSinceLastCall = now - lastGeminiApiCallTimestamp;
-
-    if (timeSinceLastCall < MIN_GEMINI_INTERVAL) {
-        const delay = MIN_GEMINI_INTERVAL - timeSinceLastCall;
-        console.log(`Rate limiting active. Delaying next Gemini API call by ${delay}ms.`);
-        await new Promise(resolve => setTimeout(resolve, delay));
-    }
-
     try {
-        lastGeminiApiCallTimestamp = Date.now();
         const result = await ai.models.generateContent(params);
         if (!result || !result.text) {
              throw new Error("Received empty response from Gemini.");
@@ -42,7 +29,6 @@ const generateContentWithRateLimit = async (params, retries = 3, backoff = 1000)
         if (isRateLimitError(error) && retries > 0) {
             console.warn(`Gemini API rate limit hit. Retrying in ${backoff}ms... (${retries} retries left)`);
             await new Promise(resolve => setTimeout(resolve, backoff));
-            // Don't apply the MIN_INTERVAL delay on retries, the backoff serves that purpose.
             return generateContentWithRateLimit(params, retries - 1, backoff * 2); // Exponential backoff
         }
         console.error("Gemini API call failed after all retries or for a non-retriable reason.", error);
@@ -729,56 +715,59 @@ const fetchEarthquakeData = async (periodInDays = 1) => {
     }
 };
 
-const earthquakeLocationCache = new Map();
+const GEOCODE_CACHE_PREFIX = 'geocode_';
+const getCachedGeocode = (id) => sessionStorage.getItem(`${GEOCODE_CACHE_PREFIX}${id}`);
+const setCachedGeocode = (id, location) => sessionStorage.setItem(`${GEOCODE_CACHE_PREFIX}${id}`, location);
 
 const getRefinedEarthquakeLocation = async (feature) => {
     if (!feature?.properties?.place) return "Unknown location";
-
-    const originalPlace = feature.properties.place;
-    const { mag } = feature.properties;
     const { id } = feature;
+    const originalPlace = feature.properties.place;
 
-    if (earthquakeLocationCache.has(id)) {
-        return earthquakeLocationCache.get(id);
+    const cachedLocation = getCachedGeocode(id);
+    if (cachedLocation) {
+        return cachedLocation;
     }
-
-    // Avoid unnecessary API calls for non-PH locations or already detailed strings
+    
+    // Optimization: If location is not in the Philippines or already seems detailed, use the original string.
     if (!originalPlace.toLowerCase().includes('philippines') || originalPlace.split(',').length > 2) {
-        earthquakeLocationCache.set(id, originalPlace);
+        setCachedGeocode(id, originalPlace);
+        return originalPlace;
+    }
+    
+    if (!feature.geometry?.coordinates || feature.geometry.coordinates.length < 2) {
+        setCachedGeocode(id, originalPlace);
         return originalPlace;
     }
 
-    const prompt = `
-        Analyze the following raw USGS earthquake report. Using Google Search, identify the specific Philippine province for the location mentioned.
-        Then, reformat the location string into this exact format: "[Distance] [Direction] of [Municipality], [Province]".
-
-        - If the search does not yield a clear province, or if the original location is already specific or a general region (e.g., "Mindanao, Philippines"), return the original text.
-        - Your final output MUST BE ONLY the refined location string. Do not include magnitude, depth, or any other text.
-
-        Raw report: "M${mag?.toFixed(1)} located ${originalPlace}"
-        
-        Refined location string:
-    `;
+    const [lon, lat] = feature.geometry.coordinates;
+    const apiKey = '39a37bba75d54052bb0f0608380b901b'; // OpenCage API Key
+    const url = `https://api.opencagedata.com/geocode/v1/json?q=${lat}+${lon}&key=${apiKey}&language=en`;
 
     try {
-        const result = await generateContentWithRateLimit({
-            model: "gemini-2.5-flash",
-            contents: prompt,
-            config: { tools: [{ googleSearch: {} }] }
-        });
+        const response = await fetchWithRetry(url, undefined);
+        const data = await response.json();
 
-        const refinedPlace = result.text.trim();
-        // A simple validation to prevent empty strings or model chatter from being displayed
-        if (refinedPlace.length < 5) {
-             throw new Error("Received an invalid refined location.");
+        if (data.status.code === 200 && data.results && data.results.length > 0) {
+            // Use the formatted address from the first result, which is usually the most relevant.
+            // OpenCage does a good job of creating a human-readable address.
+            const refinedPlace = data.results[0].formatted;
+            
+            if (refinedPlace) {
+                 setCachedGeocode(id, refinedPlace);
+                 return refinedPlace;
+            } else {
+                // Fallback if the formatted string is empty for some reason
+                throw new Error("OpenCage response missing formatted address.");
+            }
+        } else {
+            console.warn(`OpenCage reverse geocoding failed for ${lat},${lon}. Status: ${data.status.message}. Using original place.`);
+            setCachedGeocode(id, originalPlace);
+            return originalPlace;
         }
-
-        earthquakeLocationCache.set(id, refinedPlace);
-        return refinedPlace;
     } catch (error) {
-        console.error(`Failed to refine location for "${originalPlace}". Returning original.`, error);
-        // Cache the original on failure to prevent retrying a failing query
-        earthquakeLocationCache.set(id, originalPlace);
+        console.error(`Error during OpenCage reverse geocoding for ${lat},${lon}:`, error);
+        setCachedGeocode(id, originalPlace);
         return originalPlace;
     }
 };
@@ -870,16 +859,39 @@ const EarthquakeModal = ({ isOpen, onClose }) => {
             const loadData = async () => {
                 setIsLoading(true);
                 setError(null);
+                const period = filter === 'day' ? 1 : 30;
+                const cacheKey = `earthquake_data_${period}`;
+                const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
                 try {
-                    const period = filter === 'day' ? 1 : 30;
-                    const data = await fetchEarthquakeData(period);
+                    // 1. Check session cache first
+                    const cachedItem = sessionStorage.getItem(cacheKey);
+                    if (cachedItem) {
+                        const { timestamp, data } = JSON.parse(cachedItem);
+                        if (Date.now() - timestamp < CACHE_TTL) {
+                            console.log(`Using cached earthquake data for period: ${period} days`);
+                            setEarthquakes(data);
+                            setIsLoading(false);
+                            return; // Exit early
+                        }
+                    }
+
+                    // 2. Fetch from API if not in cache or expired
+                    const rawData = await fetchEarthquakeData(period);
                     
-                    const refinedDataPromises = data.map(async eq => {
+                    // 3. Process data with reverse geocoding
+                    const refinedDataPromises = rawData.map(async eq => {
                         const refinedPlace = await getRefinedEarthquakeLocation(eq);
                         return { ...eq, properties: { ...eq.properties, place: refinedPlace } };
                     });
                     const refinedEarthquakes = await Promise.all(refinedDataPromises);
+                    
+                    // 4. Update state and cache the new data
                     setEarthquakes(refinedEarthquakes);
+                    sessionStorage.setItem(cacheKey, JSON.stringify({
+                        timestamp: Date.now(),
+                        data: refinedEarthquakes
+                    }));
 
                 } catch (err) {
                     setError("Could not load seismic data. Please try again later.");
@@ -890,6 +902,7 @@ const EarthquakeModal = ({ isOpen, onClose }) => {
             loadData();
         }
     }, [isOpen, filter]);
+
 
     if (!isOpen) return null;
 
@@ -1433,28 +1446,27 @@ const App = () => {
             try {
                  const geminiPrompt = `
                     Analyze the weather data for ${resolvedLoc.displayName}.
-                    Your task is to act as an API. You MUST use Google Search to find the tide times for the nearest major port.
+                    Your task is to act as an API. You MUST use Google Search to find tide times for the nearest major port and weather for other key Philippine cities.
 
-                    Your response must be ONLY a single, valid JSON object. Do not include markdown formatting, introductory text, or any other content.
+                    Your response must be ONLY a single, valid JSON object. Do not include markdown, introductory text, or any other content.
                     The JSON object must have the following structure:
                     {
                         "summary": "A concise, one-sentence weather narrative for the day.",
                         "clothingSuggestion": "A brief, practical outfit recommendation.",
                         "tideForecast": [
-                            {
-                                "time": "ISO 8601 format, e.g., 'YYYY-MM-DDTHH:MM:SSZ'",
-                                "height": 1.2,
-                                "type": "High"
-                            }
+                            { "time": "ISO 8601 format", "height": 1.2, "type": "High" }
                         ],
                         "regionalOutlook": [
-                            {
-                                "name": "City Name",
-                                "temp": 28,
-                                "condition": "One-word weather condition"
-                            }
+                            { "name": "City Name", "temp": 28, "condition": "One-word weather condition" }
                         ]
                     }
+
+                    Constraint for "regionalOutlook":
+                    - Provide current weather for a randomly selected list of exactly 5 cities.
+                    - Randomly select 3 cities that are major provincial capitals from geographically diverse regions (e.g., one each from Luzon, Visayas, Mindanao).
+                    - Randomly select 2 cities from the National Capital Region (NCR).
+                    - EXCLUDE "${resolvedLoc.city}" from this list.
+                    - Example for "condition": "Sunny", "Cloudy", "Rainy", "Stormy".
                 `;
                 
                 const geminiResponse = await generateContentWithRateLimit({
