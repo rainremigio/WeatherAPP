@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef, useLayoutEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { GoogleGenAI, Type } from "@google/genai";
+import { PHILIPPINE_LOCATIONS } from './philippinelocations.js';
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
@@ -719,57 +720,96 @@ const GEOCODE_CACHE_PREFIX = 'geocode_';
 const getCachedGeocode = (id) => sessionStorage.getItem(`${GEOCODE_CACHE_PREFIX}${id}`);
 const setCachedGeocode = (id, location) => sessionStorage.setItem(`${GEOCODE_CACHE_PREFIX}${id}`, location);
 
-const getRefinedEarthquakeLocation = async (feature) => {
-    if (!feature?.properties?.place) return "Unknown location";
+// Helper function to calculate distance between two coordinates using the Haversine formula (Distance in kilometers)
+const haversineDistance = (lat1, lon1, lat2, lon2) => {
+    const R = 6371; // Radius of the Earth in kilometers
+    const dLat = (lat2 - lat1) * (Math.PI / 180);
+    const dLon = (lon2 - lon1) * (Math.PI / 180);
+    lat1 = lat1 * (Math.PI / 180);
+    lat2 = lat2 * (Math.PI / 180);
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+          Math.sin(dLon / 2) * Math.sin(dLon / 2) * Math.cos(lat1) * Math.cos(lat2); 
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c; // Distance in kilometers
+};
+
+// Function to find the nearest location from a static list
+const findNearestLocation = (eqLat, eqLon, locationList) => {
+    let nearestLocation = null;
+    let minDistance = Infinity;
+
+    for (const location of locationList) {
+        // Use a loose equality check (== null) to safely handle both null and undefined coordinates.
+        if (location.latitude == null || location.longitude == null) continue;
+        // This is the instant Haversine calculation
+        const distance = haversineDistance(eqLat, eqLon, location.latitude, location.longitude);
+        
+        if (distance < minDistance) {
+            minDistance = distance;
+            nearestLocation = location;
+        }
+    }
+    if (nearestLocation) {
+        return { location: nearestLocation, distance: minDistance };
+    }
+    return null;
+};
+
+// Function to determine a user-friendly location name based on nearest populated place
+const getRefinedEarthquakeLocation = (feature) => {
+    // 1. Initial Checks (Still the Fastest Path)
+    if (!feature?.properties?.place || !feature.geometry?.coordinates || feature.geometry.coordinates.length < 2) {
+        return "Unknown location";
+    }
     const { id } = feature;
     const originalPlace = feature.properties.place;
-
+    const [lon, lat] = feature.geometry.coordinates;
+    // A. Fastest: Cache Check
     const cachedLocation = getCachedGeocode(id);
     if (cachedLocation) {
         return cachedLocation;
     }
-    
-    // Optimization: If location is not in the Philippines or already seems detailed, use the original string.
-    if (!originalPlace.toLowerCase().includes('philippines') || originalPlace.split(',').length > 2) {
-        setCachedGeocode(id, originalPlace);
-        return originalPlace;
-    }
-    
-    if (!feature.geometry?.coordinates || feature.geometry.coordinates.length < 2) {
-        setCachedGeocode(id, originalPlace);
-        return originalPlace;
-    }
-
-    const [lon, lat] = feature.geometry.coordinates;
-    const apiKey = '39a37bba75d54052bb0f0608380b901b'; // OpenCage API Key
-    const url = `https://api.opencagedata.com/geocode/v1/json?q=${lat}+${lon}&key=${apiKey}&language=en`;
-
-    try {
-        const response = await fetchWithRetry(url, undefined);
-        const data = await response.json();
-
-        if (data.status.code === 200 && data.results && data.results.length > 0) {
-            // Use the formatted address from the first result, which is usually the most relevant.
-            // OpenCage does a good job of creating a human-readable address.
-            const refinedPlace = data.results[0].formatted;
+    // --- 2. INSTANT LOCAL CALCULATION (HIGHLY GRANULAR KNN) ---
+    // Find the nearest populated place from the highly granular list
+    const nearestResult = findNearestLocation(lat, lon, PHILIPPINE_LOCATIONS);
+    if (nearestResult) {
+        const { location, distance } = nearestResult;
+        const townName = location.city;
+        const provinceName = location.province;
+        
+        // Threshold 1: Very Close (Onshore/Directly felt)
+        const closeThreshold = 50; // Use the town name if within 50 km
+        
+        // Threshold 2: Offshore/Deep Water
+        const offshoreThreshold = 250; // If the nearest land is 250+ km, use the raw data (which often includes "Philippine Sea")
+        let finalAddress = originalPlace; // Start with the original data as fallback
+        if (distance <= closeThreshold) {
+            // Case A: Near a town/city (the most accurate felt area)
+            // Example: Near Magsingal, Ilocos Sur
+            finalAddress = `Near ${townName}, ${provinceName} (${Math.round(distance)} km)`;
             
-            if (refinedPlace) {
-                 setCachedGeocode(id, refinedPlace);
-                 return refinedPlace;
+        } else if (distance > closeThreshold && distance < offshoreThreshold) {
+            // Case B: Far from a town, but the town is the nearest landmass
+            // Example: 150km offshore from Palanan, Isabela
+            finalAddress = `${Math.round(distance)} km from ${townName}, ${provinceName}`;
+        } else if (distance >= offshoreThreshold) {
+            // Case C: Deep-sea or very far from any landmass
+            // Use the raw data, as it often contains generic regional info (e.g., "Mindanao Sea")
+            const lowerCasePlace = originalPlace.toLowerCase();
+            if (lowerCasePlace.includes('sea') || lowerCasePlace.includes('ocean') || distance > 500) {
+                 finalAddress = "Offshore/Deep Sea";
             } else {
-                // Fallback if the formatted string is empty for some reason
-                throw new Error("OpenCage response missing formatted address.");
+                 finalAddress = originalPlace;
             }
-        } else {
-            console.warn(`OpenCage reverse geocoding failed for ${lat},${lon}. Status: ${data.status.message}. Using original place.`);
-            setCachedGeocode(id, originalPlace);
-            return originalPlace;
         }
-    } catch (error) {
-        console.error(`Error during OpenCage reverse geocoding for ${lat},${lon}:`, error);
-        setCachedGeocode(id, originalPlace);
-        return originalPlace;
+        
+        // Save the result to the browser cache
+        setCachedGeocode(id, finalAddress);
+        return finalAddress;
     }
+    // Fallback if the coordinates are missing or data array is empty
+    setCachedGeocode(id, originalPlace);
+    return originalPlace;
 };
 
 
@@ -879,12 +919,11 @@ const EarthquakeModal = ({ isOpen, onClose }) => {
                     // 2. Fetch from API if not in cache or expired
                     const rawData = await fetchEarthquakeData(period);
                     
-                    // 3. Process data with reverse geocoding
-                    const refinedDataPromises = rawData.map(async eq => {
-                        const refinedPlace = await getRefinedEarthquakeLocation(eq);
+                    // 3. Process data with local calculation
+                    const refinedEarthquakes = rawData.map(eq => {
+                        const refinedPlace = getRefinedEarthquakeLocation(eq);
                         return { ...eq, properties: { ...eq.properties, place: refinedPlace } };
                     });
-                    const refinedEarthquakes = await Promise.all(refinedDataPromises);
                     
                     // 4. Update state and cache the new data
                     setEarthquakes(refinedEarthquakes);
@@ -929,8 +968,10 @@ const EarthquakeModal = ({ isOpen, onClose }) => {
                         earthquakes.map(eq => (
                             <li key={eq.id} className="eq-item">
                                 <div className={`eq-magnitude ${getMagClass(eq.properties.mag)}`}>
-                                    <span>M</span>{eq.properties.mag.toFixed(1)}
+                                    <span>M</span>
+                                    <span className="mag-value">{eq.properties.mag.toFixed(1)}</span>
                                 </div>
+                                <div className="eq-separator"></div>
                                 <div className="eq-info">
                                     <span className="eq-location">{eq.properties.place}</span>
                                     <span className="eq-details">
@@ -1237,7 +1278,7 @@ const App = () => {
                     const freshnessThreshold = 3600 * 1000; // 1-hour freshness threshold
 
                     if ((now - quakeTime) < freshnessThreshold) {
-                        const refinedPlace = await getRefinedEarthquakeLocation(mostRecentQuake);
+                        const refinedPlace = getRefinedEarthquakeLocation(mostRecentQuake);
                         const refinedQuakeData = { 
                             ...mostRecentQuake, 
                             properties: { ...mostRecentQuake.properties, place: refinedPlace } 
