@@ -1,3 +1,5 @@
+
+
 ---
 :root, [data-theme="light"]] {
   --font-family: 'Roboto Mono', monospace;
@@ -26,6 +28,8 @@
   --eq-mag-high: #e74c3c;
   --eq-mag-medium: #f39c12;
   --eq-mag-low: #27ae60;
+  --warning-color: #d35400; /* Darker orange for better readability */
+  --warning-bg: rgba(243, 156, 18, 0.1);
 }
 
 [data-theme="dark"] {
@@ -54,6 +58,8 @@
   --eq-mag-high: #e74c3c;
   --eq-mag-medium: #f1c40f;
   --eq-mag-low: #2ecc71;
+  --warning-color: #f39c12; /* Brighter orange for dark mode */
+  --warning-bg: rgba(243, 156, 18, 0.15);
 }
 
 
@@ -609,7 +615,18 @@ body {
     gap: 0.5rem;
     font-size: 0.8rem;
     min-height: 80px;
+    text-align: center;
 }
+
+.tide-list-unavailable.is-error {
+    color: var(--eq-mag-high);
+    opacity: 1;
+}
+.tide-list-unavailable.is-warning {
+    color: var(--warning-color);
+    opacity: 1;
+}
+
 .tide-list-unavailable svg {
     width: 24px;
     height: 24px;
@@ -720,6 +737,10 @@ body {
   width: 100%;
   padding: 1rem 0;
 }
+.inline-error.is-warning {
+    color: var(--warning-color);
+}
+
 
 .comparison-none {
   text-align: center;
@@ -1056,6 +1077,12 @@ body {
   background-color: var(--button-bg);
 }
 
+/* New Location Modal Styles */
+.location-modal-content {
+    max-width: 500px;
+}
+
+
 /* Hourly Forecast Modal Styles */
 .hourly-modal-content {
   max-width: 600px;
@@ -1213,6 +1240,12 @@ body {
   opacity: 0.9;
 }
 
+.earthquake-alert.error-state {
+    background-color: transparent;
+    color: var(--eq-mag-high);
+    border: 1px dashed var(--eq-mag-high);
+}
+
 .alert-bar-text {
   min-width: 0; /* Allows the flex item to shrink below its content size */
   overflow: hidden;
@@ -1262,6 +1295,14 @@ body {
     background-color: transparent;
     color: var(--eq-mag-high);
     border: 1px dashed var(--eq-mag-high);
+    font-style: normal;
+    font-size: 0.75rem;
+}
+
+.class-suspension-alert.warning-state {
+    background-color: var(--warning-bg);
+    color: var(--warning-color);
+    border: 1px dashed var(--warning-color);
     font-style: normal;
     font-size: 0.75rem;
 }

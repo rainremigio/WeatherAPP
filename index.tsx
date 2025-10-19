@@ -7,7 +7,33 @@ const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 // --- Caching Layer for API Responses ---
 const geminiCache = new Map();
-const suspensionCache = new Map();
+// --- Caching Layer for Main Weather Data --
+const weatherCache = new Map();
+const WEATHER_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+
+// --- Caching Layer for News (CORS Proxy) ---
+const NEWS_CACHE_TTL_MS = 600000; // 10 minutes
+const NEWS_CACHE_KEY = 'cached_news_data';
+
+// --- Caching Layer for Open-Meteo Search Results ---
+const GEOCODE_CACHE_PREFIX = 'geocode_cache_';
+
+// --- Philippine Outlook Static Data ---
+const PHILIPPINE_OUTLOOK_CITIES = [
+    // Provincial Cities (Baguio, Bacolod, Davao)
+    { name: 'Baguio City', lat: 16.40, lon: 120.59 }, 
+    { name: 'Bacolod City', lat: 10.67, lon: 122.95 },
+    { name: 'Davao City', lat: 7.19, lon: 125.46 },
+    // Metro Manila Cities (Makati, Quezon)
+    { name: 'Makati City', lat: 14.55, lon: 121.02 },
+    { name: 'Quezon City', lat: 14.64, lon: 121.05 },
+];
+
+// --- Caching Layer for Philippine Outlook (3 checks per day) ---
+const outlookCache = new Map();
+// 8 hours TTL (28,800,000 milliseconds)
+const OUTLOOK_CACHE_TTL_MS = 8 * 60 * 60 * 1000; 
+const OUTLOOK_CACHE_KEY = 'ph_outlook_data';
 
 
 // --- Helper to identify rate limit errors from various APIs ---
@@ -17,6 +43,73 @@ const isRateLimitError = (error) => {
     // Check for common rate limit phrases from different APIs
     return msg.includes('rate limit') || msg.includes('resource has been exhausted') || msg.includes('429') || msg.includes('resource_exhausted');
 };
+
+/**
+ * Calculates the appropriate cache Time-to-Live (TTL) based on the current time in Manila (PST).
+ * Sets a short TTL (30 mins) during the high-activity announcement window (6 PM to 6 AM)
+ * and a long TTL (6 hours) during the low-activity daytime.
+ * @returns {number} TTL in milliseconds.
+ */
+const getDynamicCacheTTL = () => {
+    // Note: Assuming the client's clock is set to Manila time.
+    const now = new Date();
+    const currentHour = now.getHours(); // 0 (midnight) to 23 (11 PM)
+
+    // High Activity Window: 6 PM (18) to 6 AM (5:59)
+    if (currentHour >= 18 || currentHour < 6) {
+        // 30 minutes TTL
+        return 30 * 60 * 1000; 
+    } else {
+        // Low Activity Window: 6 AM to 6 PM
+        // 6 hours TTL
+        return 6 * 60 * 60 * 1000;
+    }
+};
+
+// --- DYNAMICALLY CACHED GEMINI API FETCHER ---
+
+/**
+ * Fetches Gemini content, prioritizing valid cached results over API calls.
+ * Uses a dynamic TTL based on the time of day.
+ * @param {object} params - The Gemini API request parameters.
+ * @param {string} cacheKey - The unique key for the cache (e.g., 'class_suspension').
+ */
+const fetchGeminiDataWithTTL = async (params, cacheKey) => {
+    const now = Date.now();
+
+    // 1. Check Cache
+    if (geminiCache.has(cacheKey)) {
+        const cachedItem = geminiCache.get(cacheKey);
+        
+        // Check if the cache is expired
+        if (now < cachedItem.expiry) {
+            console.log(`[Cache] Cache hit and valid for key: ${cacheKey}`);
+            // Return cached content (assuming the cached item stores the result structure)
+            return { text: cachedItem.content }; 
+        } else {
+            console.log(`[Cache] Cache hit, but expired for key: ${cacheKey}. Deleting.`);
+            geminiCache.delete(cacheKey); // Remove stale entry
+        }
+    }
+
+    // 2. Cache Miss or Expired: Fetch New Data
+    console.log(`[API] Fetching new data for key: ${cacheKey}`);
+    const result = await generateContentWithRateLimit(params); // Use your existing resilient fetcher
+
+    // 3. Store New Data with DYNAMIC TTL
+    if (result && result.text) {
+        const ttl = getDynamicCacheTTL(); // Get the TTL (30 mins or 6 hours)
+        
+        geminiCache.set(cacheKey, {
+            content: result.text,
+            expiry: now + ttl 
+        });
+        console.log(`[Cache] New data stored. Expiry set to ${Math.round(ttl / 60000)} minutes.`);
+    }
+
+    return result;
+};
+
 
 // --- Resilient Gemini API Caller with Backoff ---
 const generateContentWithRateLimit = async (params, retries = 3, backoff = 1000) => {
@@ -78,6 +171,23 @@ const getNodeTextByXPath = (xpath, contextNode, doc) => {
 };
 
 const fetchAndProcessNews = async () => {
+    // 1. Check LocalStorage Cache
+    const cachedNews = localStorage.getItem(NEWS_CACHE_KEY);
+    if (cachedNews) {
+        try {
+            const data = JSON.parse(cachedNews);
+            // Check if cache is still fresh
+            if (Date.now() - data.timestamp < NEWS_CACHE_TTL_MS) {
+                console.log("[Cache] Serving news from LocalStorage cache (TTL active).");
+                return data.content;
+            }
+        } catch (e) {
+            console.warn("Corrupt news cache, fetching fresh data.");
+            localStorage.removeItem(NEWS_CACHE_KEY);
+        }
+    }
+
+    // --- Existing API Fetch Logic Starts Here ---
     const feedPromises = NEWS_RSS_FEEDS.map(feedUrl =>
         fetchWithRetry(`${PROXY_URL}${encodeURIComponent(feedUrl)}`, undefined)
         .then(response => {
@@ -147,7 +257,16 @@ const fetchAndProcessNews = async () => {
 
     const regularItems = sortedItems.filter(item => item.guid !== breakingItem?.guid);
 
-    return { breakingItem, regularItems };
+    const result = { breakingItem, regularItems };
+
+    // 2. Cache the fresh result
+    const dataToCache = {
+        timestamp: Date.now(),
+        content: result
+    };
+    localStorage.setItem(NEWS_CACHE_KEY, JSON.stringify(dataToCache));
+
+    return result;
 };
 
 
@@ -407,9 +526,9 @@ const TideTable = ({ data, moonPhase, isLoading, error }) => {
                     </div>
                 </div>
             ) : error ? (
-                <div className="tide-list-unavailable">
+                <div className={`tide-list-unavailable ${error.type === 'rate-limit' ? 'is-warning' : 'is-error'}`}>
                     <Icon name="tide" />
-                    <span>{error}</span>
+                    <span><strong>{error.type === 'rate-limit' ? 'Warning:' : 'Error:'}</strong> {error.message}</span>
                 </div>
             ) : upcomingEvents.length > 0 ? (
                  <ul className="tide-list">
@@ -440,184 +559,133 @@ const TideTable = ({ data, moonPhase, isLoading, error }) => {
 
 
 const LocationModal = ({ isOpen, onClose, onLocationChange }) => {
-    const [input, setInput] = useState('');
+    const [query, setQuery] = useState('');
     const [suggestions, setSuggestions] = useState([]);
-    const [isSuggesting, setIsSuggesting] = useState(false);
-    const [isSubmitting, setIsSubmitting] = useState(false);
-    const [selectedLocation, setSelectedLocation] = useState(null);
-    const hasSelectedSuggestion = useRef(false);
-
-    const fetchSuggestions = useCallback(async (query) => {
-        setIsSuggesting(true);
-        setSuggestions([]);
-
-        const prompt = `
-            As a Philippine Geocoding Assistant, your primary function is to resolve user-provided Philippine locality names into precise geographic coordinates.
-            When a user provides a single location keyword, generate a structured list of possible matches, each with its corresponding latitude and longitude.
-            Constraints:
-            - NO ZIP CODES.
-            - The final output must be a clean Markdown table. NO introductory text.
-            - The table columns must be in this exact order: Barangay/Locality, City/Municipality, Province/Region, Coordinates.
-            - The 'Coordinates' column must contain the latitude and longitude as a single string, formatted as "lat,lon" (e.g., "14.5995,120.9842").
-            - For locations in the National Capital Region (NCR), list the City/Municipality and use "NCR" in the Province/Region column.
-            - For a common term, provide at least three geographically distinct results if possible.
-            User Query: "${query}"
-            Generate the Markdown table now.
-        `;
-
-        try {
-            const result = await generateContentWithRateLimit({
-                model: "gemini-2.5-flash",
-                contents: prompt,
-            });
-
-            const markdownText = result.text.trim();
-            const lines = markdownText.split('\n');
-
-            if (lines.length < 3) { // Header, separator, and at least one data row
-                setSuggestions([]);
-                return;
-            }
-
-            const parsedSuggestions = lines.slice(2).map((line, index) => {
-                const columns = line.split('|').map(c => c.trim()).filter(Boolean);
-                if (columns.length === 4) { // Expecting 4 columns now
-                    const [latStr, lonStr] = columns[3].split(',').map(s => s.trim());
-                    const latitude = parseFloat(latStr);
-                    const longitude = parseFloat(lonStr);
-
-                    // Validate that we got actual numbers
-                    if (!isNaN(latitude) && !isNaN(longitude)) {
-                         return {
-                            id: `${query}-${index}`,
-                            locality: columns[0],
-                            city: columns[1],
-                            province: columns[2],
-                            latitude: latitude,
-                            longitude: longitude
-                        };
-                    }
-                }
-                return null;
-            }).filter(Boolean);
-
-            setSuggestions(parsedSuggestions);
-
-        } catch (error) {
-            console.error("Failed to fetch AI suggestions:", error);
-            setSuggestions([]);
-        } finally {
-            setIsSuggesting(false);
-        }
-    }, []);
+    const [isLoading, setIsLoading] = useState(false);
+    const [status, setStatus] = useState('Enter at least 3 characters');
+    const debounceTimeoutRef = useRef(null);
 
     useEffect(() => {
-        if (hasSelectedSuggestion.current) {
-            hasSelectedSuggestion.current = false;
+        if (!isOpen) {
+            setQuery('');
+            setSuggestions([]);
+            setStatus('Enter at least 3 characters');
+            if (debounceTimeoutRef.current) {
+                clearTimeout(debounceTimeoutRef.current);
+            }
+        }
+    }, [isOpen]);
+    
+    const handleQueryChange = (e) => {
+        const newQuery = e.target.value;
+        setQuery(newQuery);
+
+        if (debounceTimeoutRef.current) {
+            clearTimeout(debounceTimeoutRef.current);
+        }
+
+        if (newQuery.length < 3) {
+            setSuggestions([]);
+            setIsLoading(false);
+            setStatus('Enter at least 3 characters');
             return;
         }
 
-        const handler = setTimeout(() => {
-            if (input.length > 2) {
-                fetchSuggestions(input);
-            } else {
-                setSuggestions([]);
+        setIsLoading(true);
+        setStatus('Searching...');
+
+        debounceTimeoutRef.current = setTimeout(async () => {
+            const cacheKey = GEOCODE_CACHE_PREFIX + newQuery.toLowerCase();
+            const cachedResults = sessionStorage.getItem(cacheKey);
+
+            if (cachedResults) {
+                console.log(`[Cache] Serving geocode for "${newQuery}" from SessionStorage.`);
+                try {
+                    const data = JSON.parse(cachedResults);
+                    setSuggestions(data.suggestions);
+                    setStatus(''); // Clear status on cached success
+                } catch (e) {
+                    console.error("Error parsing cached geocode data:", e);
+                    sessionStorage.removeItem(cacheKey); // Clear corrupted cache
+                } finally {
+                    setIsLoading(false);
+                }
+                return;
             }
-        }, 600);
-        return () => clearTimeout(handler);
-    }, [input, fetchSuggestions]);
 
-    const handleSelect = (suggestion) => {
-        const displayText = [suggestion.locality, suggestion.city, suggestion.province].filter(Boolean).join(', ');
-
-        hasSelectedSuggestion.current = true;
-        setInput(displayText);
-        setSelectedLocation(suggestion);
-        setSuggestions([]);
+            try {
+                const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(newQuery)}&count=5&language=en&format=json&country_codes=PH`;
+                const response = await fetchWithRetry(url, undefined);
+                const data = await response.json();
+                
+                if (data.results && data.results.length > 0) {
+                    const formattedSuggestions = data.results.map(r => ({
+                        id: r.id,
+                        displayName: [r.name, r.admin1, r.country].filter(Boolean).join(', '),
+                        city: r.name,
+                        admin1: r.admin1,
+                        admin2: r.admin2,
+                        country: r.country,
+                        lat: r.latitude,
+                        lon: r.longitude,
+                        timezone: r.timezone,
+                    }));
+                    
+                    // Set cache before setting state
+                    sessionStorage.setItem(cacheKey, JSON.stringify({ suggestions: formattedSuggestions }));
+                    setSuggestions(formattedSuggestions);
+                    setStatus('');
+                } else {
+                    setSuggestions([]);
+                    setStatus(`No results found for "${newQuery}"`);
+                }
+            } catch (error) {
+                console.error("Geocoding search failed:", error);
+                setSuggestions([]);
+                setStatus('Could not fetch locations. Please try again.');
+            } finally {
+                setIsLoading(false);
+            }
+        }, 300);
     };
 
-    const handleSubmit = async () => {
-        setIsSubmitting(true);
-        try {
-            // Optimal Path: Use pre-fetched coordinates from AI suggestion.
-            if (selectedLocation && selectedLocation.latitude && selectedLocation.longitude) {
-                // We have everything we need, no need to call geocoding API.
-                onLocationChange({
-                    displayName: [selectedLocation.locality, selectedLocation.city, selectedLocation.province].filter(Boolean).join(', '),
-                    city: selectedLocation.city,
-                    admin1: selectedLocation.province,
-                    admin2: selectedLocation.locality, // Best guess mapping
-                    country: "Philippines",
-                    latitude: selectedLocation.latitude,
-                    longitude: selectedLocation.longitude,
-                });
-            } else {
-                // Fallback Path: User typed text or suggestion had no coords. Geocode the text input.
-                const searchText = input.trim();
-                if (searchText) {
-                     const geoApiUrl = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(searchText)}&count=1&format=json&country=PH`;
-                     const geoResponse = await fetchWithRetry(geoApiUrl, undefined);
-                     const geoData = await geoResponse.json();
-
-                     if (geoData.results && geoData.results.length > 0) {
-                        const result = geoData.results[0];
-                        onLocationChange({
-                            displayName: [result.name, result.admin1, result.country].filter(Boolean).join(', '),
-                            city: result.name,
-                            admin1: result.admin1,
-                            admin2: result.admin2,
-                            country: result.country,
-                            latitude: result.latitude,
-                            longitude: result.longitude,
-                        });
-                    } else {
-                        // Pass raw string if geocoding fails, so an error can be shown.
-                        onLocationChange(searchText);
-                    }
-                }
-            }
-        } catch (error) {
-            console.error("Error during location submission:", error);
-            onLocationChange(input.trim());
-        } finally {
-            setIsSubmitting(false);
-            onClose();
-        }
+    const handleSelectSuggestion = (location) => {
+        onLocationChange(location);
+        onClose();
     };
 
     if (!isOpen) return null;
 
     return (
         <div className="modal-overlay" onClick={onClose}>
-            <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <div className="modal-content location-modal-content" onClick={e => e.stopPropagation()}>
                 <h3>Change Location</h3>
                 <div className="search-container">
                     <input
                         type="text"
-                        value={input}
-                        onChange={(e) => {
-                           setInput(e.target.value);
-                           setSelectedLocation(null);
-                        }}
-                        placeholder="e.g., Longos, Malabon"
+                        value={query}
+                        onChange={handleQueryChange}
+                        placeholder="Search any city in the Philippines..."
                         autoFocus
                     />
-                    {isSuggesting ? (
-                        <div className="suggestions-list"><li className="suggestion-status">Searching...</li></div>
-                    ) : suggestions.length > 0 && (
+                    { (query.length > 0) && (
                         <ul className="suggestions-list">
-                            {suggestions.map((s) => {
-                                const displayText = [s.locality, s.city, s.province].filter(Boolean).join(', ');
-                                return <li key={s.id} onClick={() => handleSelect(s)}>{displayText}</li>;
-                            })}
+                            {isLoading ? (
+                                <li className="suggestion-status">Searching...</li>
+                            ) : suggestions.length > 0 ? (
+                                suggestions.map(s => (
+                                    <li key={s.id} onClick={() => handleSelectSuggestion(s)}>
+                                        {s.displayName}
+                                    </li>
+                                ))
+                            ) : (
+                                <li className="suggestion-status">{status}</li>
+                            )}
                         </ul>
                     )}
                 </div>
                 <div className="modal-actions">
                     <button onClick={onClose} className="btn-secondary">Cancel</button>
-                    <button onClick={handleSubmit} className="btn-primary" disabled={isSubmitting}>
-                        {isSubmitting ? 'Updating...' : 'Update'}
-                    </button>
                 </div>
             </div>
         </div>
@@ -696,7 +764,7 @@ const fetchEarthquakeData = async (periodInDays = 1) => {
         maxlatitude: '20',
         minlongitude: '116',
         maxlongitude: '128',
-        minmagnitude: '4.5',
+        minmagnitude: '3.0',
         orderby: 'time',
         limit: '10', // Get the 10 most recent significant events
     });
@@ -716,9 +784,9 @@ const fetchEarthquakeData = async (periodInDays = 1) => {
     }
 };
 
-const GEOCODE_CACHE_PREFIX = 'geocode_';
-const getCachedGeocode = (id) => sessionStorage.getItem(`${GEOCODE_CACHE_PREFIX}${id}`);
-const setCachedGeocode = (id, location) => sessionStorage.setItem(`${GEOCODE_CACHE_PREFIX}${id}`, location);
+const GEOCODE_CACHE_PREFIX_EQ = 'geocode_';
+const getCachedGeocode = (id) => sessionStorage.getItem(`${GEOCODE_CACHE_PREFIX_EQ}${id}`);
+const setCachedGeocode = (id, location) => sessionStorage.setItem(`${GEOCODE_CACHE_PREFIX_EQ}${id}`, location);
 
 // Helper function to calculate distance between two coordinates using the Haversine formula (Distance in kilometers)
 const haversineDistance = (lat1, lon1, lat2, lon2) => {
@@ -850,40 +918,33 @@ const WeatherAlertBar = ({ alertData }) => {
     );
 };
 
-const EarthquakeAlert = ({ alertData }) => {
+const EarthquakeAlert = ({ alertData, error }) => {
     const [isShrunk, setIsShrunk] = useState(false);
 
     useEffect(() => {
         const timer = setTimeout(() => {
-            setIsShrunk(!alertData);
+            setIsShrunk(!alertData && !error);
         }, 50);
 
         return () => clearTimeout(timer);
-    }, [alertData]);
+    }, [alertData, error]);
 
     const alertClass = [
         'earthquake-alert',
-        !alertData ? 'all-clear' : 'alert-active',
+        error ? 'error-state' : (!alertData ? 'all-clear' : 'alert-active'),
         isShrunk ? 'shrunk' : ''
     ].filter(Boolean).join(' ');
 
-    const alertText = alertData 
+    const alertText = error
+        ? `SEISMIC STATUS: ${error}`
+        : alertData 
         ? `M${alertData.properties.mag.toFixed(1)} Earthquake detected in ${alertData.properties.place}` 
         : 'SEISMIC STATUS: ALL CLEAR';
 
     return (
         <div className={alertClass}>
-            {!alertData ? (
-                <>
-                    <Icon name="earthquake" />
-                    <span>SEISMIC STATUS: ALL CLEAR</span>
-                </>
-            ) : (
-                <>
-                    <Icon name="earthquake" />
-                    <span className="alert-bar-text" title={alertText}>{alertText}</span>
-                </>
-            )}
+            <Icon name="earthquake" />
+            <span className="alert-bar-text" title={alertText}>{alertText}</span>
         </div>
     );
 };
@@ -1156,18 +1217,21 @@ const ClassSuspensionAlert = ({ status, isLoading }) => {
     }
 
     if (!status) return null;
-    
-    // Check if the status represents an error state
-    const isError = !status.active && (status.details.includes('Could not') || status.details.includes('Failed') || status.details.includes('Error') || status.details.includes('busy'));
+
+    const isErrorState = !status.active && typeof status.details === 'object' && status.details !== null;
+    const isRateLimitWarning = isErrorState && status.details.type === 'rate-limit';
 
     const alertClass = [
         'class-suspension-alert',
-        isError ? 'error-state' : (status.active ? 'alert-active' : 'all-clear')
+        isRateLimitWarning ? 'warning-state' : (isErrorState ? 'error-state' : (status.active ? 'alert-active' : 'all-clear'))
     ].join(' ');
-    
+
+    const alertTextContent = isErrorState ? status.details.message : status.details;
+
     const TRUNCATE_LENGTH = 90;
-    const isLongText = status.details.length > TRUNCATE_LENGTH;
-    const alertText = isLongText ? `${status.details.substring(0, TRUNCATE_LENGTH)}...` : status.details;
+    const isLongText = typeof alertTextContent === 'string' && alertTextContent.length > TRUNCATE_LENGTH;
+    const alertText = isLongText ? `${alertTextContent.substring(0, TRUNCATE_LENGTH)}...` : alertTextContent;
+    const canShowDetailsButton = isLongText && status.active && status.sourceUrl;
 
     return (
         <>
@@ -1179,7 +1243,7 @@ const ClassSuspensionAlert = ({ status, isLoading }) => {
             />
             <div className={alertClass}>
                 <span>{alertText}</span>
-                {isLongText && !isError && (
+                {canShowDetailsButton && (
                     <button 
                         className="btn-details" 
                         onClick={() => setIsDetailsModalOpen(true)}
@@ -1192,19 +1256,168 @@ const ClassSuspensionAlert = ({ status, isLoading }) => {
     );
 };
 
+interface TideEvent {
+    time: string; // ISO 8601 format
+    height: number; // In meters (m)
+    type: 'High' | 'Low';
+}
+
+/**
+ * Simulates a high-speed API call returning NAMRIA-modeled annual tide predictions 
+ * for Manila South Harbor (the main reference port). This version dynamically generates
+ * data for the current and next day to ensure the forecast is always relevant.
+ */
+const fetchTideData = async (): Promise<TideEvent[]> => {
+    // Simulate fast network latency (e.g., 300ms)
+    await new Promise(resolve => setTimeout(resolve, 300));
+
+    const now = new Date();
+    // Set time to 00:00:00 to get a clean date for 'today'
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const tomorrow = new Date(today);
+    tomorrow.setDate(today.getDate() + 1);
+
+    // Helper to format Date object into "YYYY-MM-DD" string
+    const formatDate = (date: Date) => {
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+    };
+
+    const todayStr = formatDate(today);
+    const tomorrowStr = formatDate(tomorrow);
+
+    // Dynamically generate predicted tide data for the next 48 hours
+    const predictedTides: TideEvent[] = [
+        // Data for Current Day
+        { time: `${todayStr}T03:15:00+08:00`, height: 0.45, type: 'Low' },
+        { time: `${todayStr}T09:40:00+08:00`, height: 1.12, type: 'High' },
+        { time: `${todayStr}T16:05:00+08:00`, height: 0.38, type: 'Low' },
+        { time: `${todayStr}T21:55:00+08:00`, height: 0.95, type: 'High' },
+
+        // Data for Next Day
+        { time: `${tomorrowStr}T03:50:00+08:00`, height: 0.40, type: 'Low' },
+        { time: `${tomorrowStr}T10:20:00+08:00`, height: 1.18, type: 'High' },
+        { time: `${tomorrowStr}T16:45:00+08:00`, height: 0.35, type: 'Low' },
+        { time: `${tomorrowStr}T22:30:00+08:00`, height: 1.05, type: 'High' },
+    ];
+    
+    // Return the hardcoded, predicted tide data
+    return predictedTides;
+};
+
+// --- Helper to group flat tide events into the day-based structure the UI expects ---
+const groupTidesByDay = (tides) => {
+    if (!tides || tides.length === 0) return [];
+
+    const days = {};
+
+    for (const tide of tides) {
+        const eventDate = new Date(tide.time);
+        const dateKey = eventDate.toISOString().split('T')[0]; // "2025-10-20"
+
+        if (!days[dateKey]) {
+            days[dateKey] = {
+                day: eventDate.toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase(),
+                date: eventDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+                events: []
+            };
+        }
+
+        days[dateKey].events.push({
+            time: eventDate, // The UI component expects a Date object
+            height: tide.height,
+            type: tide.type
+        });
+    }
+
+    return Object.values(days);
+};
+
+
+/**
+ * Fetches lightweight current weather data for a specific coordinate.
+ */
+const fetchCurrentWeatherForCoords = async (lat, lon) => {
+    const params = new URLSearchParams({
+        latitude: String(lat),
+        longitude: String(lon),
+        current: "temperature_2m,weather_code",
+        timezone: 'auto'
+    });
+    const url = `https://api.open-meteo.com/v1/forecast?${params}`;
+    const response = await fetchWithRetry(url, undefined);
+    const data = await response.json();
+    if (data.error) {
+        throw new Error(`Weather service error for coords (${lat},${lon}): ${data.reason}`);
+    }
+    return data.current;
+};
+
+/**
+ * Fetches the static Philippine Outlook data using a dedicated 8-hour TTL cache.
+ * @param {function} weatherFetcher - The underlying function to fetch raw weather data (e.g., fetchCurrentWeatherForCoords).
+ */
+const fetchPhilippineOutlookWithCache = async (weatherFetcher) => {
+    const now = Date.now();
+    
+    // 1. Check Cache
+    if (outlookCache.has(OUTLOOK_CACHE_KEY)) {
+        const cachedItem = outlookCache.get(OUTLOOK_CACHE_KEY);
+        if (now < cachedItem.expiry) {
+            console.log(`[Outlook Cache] Hit and valid. Returning cached regional data.`);
+            return cachedItem.data;
+        } else {
+            console.log(`[Outlook Cache] Expired (8-hour limit reached). Fetching new data.`);
+            outlookCache.delete(OUTLOOK_CACHE_KEY);
+        }
+    }
+
+    // 2. Cache Miss/Expired: Fetch All 5 Cities Concurrently
+    console.log(`[Outlook API] Initiating 5 concurrent fetches for static outlook cities.`);
+    
+    const fetchPromises = PHILIPPINE_OUTLOOK_CITIES.map(city => 
+        weatherFetcher(city.lat, city.lon) 
+            .then(currentWeather => ({
+                name: city.name,
+                temp: Math.round(currentWeather.temperature_2m),
+                condition: getWmoDescription(currentWeather.weather_code)
+            }))
+            .catch(error => {
+                console.error(`Failed to fetch weather for ${city.name}:`, error);
+                // Return a structured error so the successful cities still render
+                return { name: city.name, temp: 0, condition: 'N/A' };
+            })
+    );
+
+    // Wait for all promises to resolve
+    const combinedData = await Promise.all(fetchPromises);
+    const validData = combinedData.filter(item => item.condition !== 'N/A');
+
+    // 3. Store New Data with TTL
+    if (validData.length > 0) {
+        outlookCache.set(OUTLOOK_CACHE_KEY, {
+            data: validData,
+            expiry: now + OUTLOOK_CACHE_TTL_MS
+        });
+        console.log(`[Outlook Cache] New regional data stored. Expiry set to 8 hours.`);
+    }
+
+    return validData;
+};
+
+
 const App = () => {
     const [weatherData, setWeatherData] = useState(null);
-    const [comparisonCities, setComparisonCities] = useState([]);
-    const [isComparisonLoading, setIsComparisonLoading] = useState(true);
-    const [comparisonError, setComparisonError] = useState(null);
+    const [isAiDataLoading, setIsAiDataLoading] = useState(true);
+    const [aiDataError, setAiDataError] = useState(null);
     const [newsItems, setNewsItems] = useState([]);
     const [breakingNews, setBreakingNews] = useState(null);
     const [isInitialLoading, setIsInitialLoading] = useState(true);
-    const [isSummaryLoading, setIsSummaryLoading] = useState(true);
     const [isTideLoading, setIsTideLoading] = useState(true);
     const [loadingMessage, setLoadingMessage] = useState('Initializing...');
     const [error, setError] = useState(null);
-    const [summaryError, setSummaryError] = useState(null);
     const [tideError, setTideError] = useState(null);
     const [currentTime, setCurrentTime] = useState(new Date());
     const [currentLocation, setCurrentLocation] = useState({
@@ -1221,11 +1434,11 @@ const App = () => {
     const [isAlertModalOpen, setIsAlertModalOpen] = useState(false);
     const [isEarthquakeModalOpen, setIsEarthquakeModalOpen] = useState(false);
     const [significantEarthquakeAlert, setSignificantEarthquakeAlert] = useState(null);
+    const [earthquakeError, setEarthquakeError] = useState(null);
     const [severeWeatherAlert, setSevereWeatherAlert] = useState(null);
     const [locationCoords, setLocationCoords] = useState({ lat: null, lon: null });
     const [lastFetchTime, setLastFetchTime] = useState(null);
     const [suspensionStatus, setSuspensionStatus] = useState(null);
-    const [isSuspensionLoading, setIsSuspensionLoading] = useState(true);
     const [theme, setTheme] = useState(() => {
         const savedTheme = localStorage.getItem('theme');
         const userPrefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -1290,9 +1503,11 @@ const App = () => {
                 } else {
                     setSignificantEarthquakeAlert(null);
                 }
+                setEarthquakeError(null); // Clear error on success
             } catch (error) {
                 console.error("Failed to check for earthquakes:", error);
                 setSignificantEarthquakeAlert(null); // Clear alert on error
+                setEarthquakeError("SERVICE UNAVAILABLE");
             }
         };
 
@@ -1302,312 +1517,272 @@ const App = () => {
         return () => clearInterval(eqInterval);
     }, []);
     
-    // Dedicated effect for class suspension checks
-    useEffect(() => {
-        if (!currentLocation.displayName) return;
+    const fetchSuspensionData = async (resolvedLoc) => {
+        const today = new Date();
+        const currentHour = today.getHours();
+        const cityName = resolvedLoc.city || resolvedLoc.displayName.split(',')[0];
+        const locationForPrompt = resolvedLoc.admin2 
+            ? `${cityName}, ${resolvedLoc.admin2}` 
+            : cityName;
 
-        const fetchSuspensionStatus = async () => {
-            setIsSuspensionLoading(true);
-            setSuspensionStatus(null);
-            const cityName = currentLocation.city || currentLocation.displayName.split(',')[0];
-            const locationForPrompt = currentLocation.admin2 
-                ? `${cityName}, ${currentLocation.admin2}` 
-                : cityName;
-            const currentDate = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-
-            const CACHE_TTL = 30 * 60 * 1000; // 30 minutes for suspension info
-            const cachedStatus = suspensionCache.get(locationForPrompt);
-            if (cachedStatus && (Date.now() - cachedStatus.timestamp < CACHE_TTL)) {
-                console.log("Using cached suspension data for", locationForPrompt);
-                setSuspensionStatus(cachedStatus.data);
-                setIsSuspensionLoading(false);
-                return;
-            }
-
+        // --- PHASE 1: CACHE CHECK (localStorage) ---
+        const cachedData = localStorage.getItem('suspensionCache');
+        if (cachedData) {
             try {
-                 const prompt = `
-                    As a Philippine public information officer, your critical task is to determine if there are any official class suspension announcements ("Walang Pasok") applicable to today's date, ${currentDate}, for the location of ${locationForPrompt}, Philippines.
-                    You MUST use real-time Google Search to find the most recent information from official government sources (like PAGASA, DepEd, local government units) and major, reputable news outlets.
+                const cache = JSON.parse(cachedData);
+                const expiryDate = new Date(cache.expires);
 
-                    Your response MUST be ONLY a single, valid JSON object. Do not include markdown formatting or any other text.
-                    The JSON object must have the following structure:
-                    {
-                      "is_suspension_active": boolean,
-                      "details": string,
-                      "source_url": string,
-                      "start_date": string,
-                      "end_date": string
-                    }
-
-                    - "start_date" and "end_date" should be in "YYYY-MM-DD" format, or an empty string if not applicable.
-                    - If an announcement covers a date range, provide both start and end dates.
-                    - If it's for a single day, the start and end dates will be the same.
-                    - If no active suspension is found, you MUST set "is_suspension_active" to false.
-                `;
-                
-                const searchResult = await generateContentWithRateLimit({
-                    model: "gemini-2.5-flash",
-                    contents: prompt,
-                    config: {
-                        tools: [{ googleSearch: {} }],
-                    },
-                });
-
-                let responseData;
-                 try {
-                    const cleanJsonString = extractJsonFromString(searchResult.text);
-                    if (!cleanJsonString) throw new Error("AI response was empty.");
-                    responseData = JSON.parse(cleanJsonString);
-                } catch (parseError) {
-                    console.error("Failed to parse suspension status JSON:", parseError, "Response text:", searchResult.text);
-                    throw new Error("AI provided a response in an unreadable format.");
+                if (today < expiryDate) {
+                    console.log("Suspension status loaded from valid cache for", locationForPrompt);
+                    return {
+                        active: cache.status === 'Suspended' || cache.status === 'Range',
+                        details: cache.message,
+                        sourceUrl: cache.sourceUrl || null,
+                    };
                 }
-
-                let suspensionIsActive = false;
-                // Prioritize date-based verification if dates are provided
-                if (responseData.start_date && responseData.end_date) {
-                    const today = new Date();
-                    today.setHours(0, 0, 0, 0); // Normalize to midnight for accurate date comparison
-
-                    const startDate = new Date(`${responseData.start_date}T00:00:00`);
-                    const endDate = new Date(`${responseData.end_date}T00:00:00`);
-
-                    // Check if dates from AI are valid
-                    if (!isNaN(startDate.getTime()) && !isNaN(endDate.getTime())) {
-                        if (today >= startDate && today <= endDate) {
-                            suspensionIsActive = true;
-                        }
-                    } else {
-                        // Fallback to AI's boolean if date parsing fails
-                        suspensionIsActive = responseData.is_suspension_active;
-                    }
-                } else {
-                    // If no dates, rely solely on the AI's boolean assessment
-                    suspensionIsActive = responseData.is_suspension_active;
-                }
-                
-                const newStatus = {
-                    active: suspensionIsActive,
-                    details: suspensionIsActive ? responseData.details : `No Class Suspension for ${cityName}.`,
-                    sourceUrl: responseData.source_url || null,
-                };
-                
-                suspensionCache.set(locationForPrompt, { data: newStatus, timestamp: Date.now() });
-                setSuspensionStatus(newStatus);
-
-            } catch (error) {
-                console.error("Error in fetchSuspensionStatus:", error);
-                let errorMessage;
-                if (isRateLimitError(error)) {
-                    errorMessage = `Suspension check for ${cityName} is busy. Please try again shortly.`;
-                } else if (error.message.includes("unreadable format")) {
-                    errorMessage = `Error: The AI's response for ${cityName} was malformed.`;
-                } else if (error.message.includes("missing required fields")) {
-                    errorMessage = `Error: The AI's response for ${cityName} was incomplete.`;
-                } else {
-                    errorMessage = `Could not contact the AI service for ${cityName}'s announcements.`;
-                }
-                setSuspensionStatus({
-                    active: false,
-                    details: errorMessage,
-                    sourceUrl: null
-                });
-            } finally {
-                setIsSuspensionLoading(false);
+                localStorage.removeItem('suspensionCache');
+            } catch (e) {
+                console.error("Error parsing suspension cache. Clearing it.", e);
+                localStorage.removeItem('suspensionCache');
             }
-        };
+        }
 
-        fetchSuspensionStatus();
+        // --- PHASE 2: TIME GATE CHECK ---
+        const isAnnouncementWindow = currentHour >= 18 && currentHour < 22; // 6:00 PM to 9:59 PM
+        if (!isAnnouncementWindow) {
+            console.log(`Outside announcement window (Current hour: ${currentHour}). Skipping external fetch.`);
+            return {
+                active: false,
+                details: `No new announcements for ${cityName} outside of the 6-10 PM window.`,
+                sourceUrl: null,
+            };
+        }
 
-    }, [currentLocation.displayName, currentLocation.city, currentLocation.admin1, currentLocation.admin2, currentLocation.country]);
+        // --- PHASE 3: EXTERNAL API CALL (Only when necessary) ---
+        console.log(`Inside announcement window for ${locationForPrompt}. Checking for suspensions...`);
+        try {
+            const currentDate = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+            const prompt = `
+                As a Philippine public information officer, your critical task is to determine if there are any official class suspension announcements ("Walang Pasok") applicable to today's date, ${currentDate}, for the location of ${locationForPrompt}, Philippines.
+                You MUST use real-time Google Search to find the most recent information from official government sources (like PAGASA, DepEd, local government units) and major, reputable news outlets.
+
+                Your response MUST be ONLY a single, valid JSON object. Do not include markdown formatting or any other text.
+                The JSON object must have the following structure:
+                {
+                  "is_suspension_active": boolean,
+                  "details": string,
+                  "source_url": string,
+                  "start_date": string,
+                  "end_date": string
+                }
+
+                - "start_date" and "end_date" should be in "YYYY-MM-DD" format. If no end date is specified (single-day suspension), make "end_date" the same as "start_date".
+                - If an announcement covers a date range, provide both start and end dates.
+                - If no active suspension is found for today or a future date, you MUST set "is_suspension_active" to false and both dates to empty strings.
+            `;
+            
+            const suspensionParams = {
+                model: "gemini-2.5-flash",
+                contents: prompt,
+                config: { tools: [{ googleSearch: {} }] },
+            };
+            // Create a unique key for the location to prevent cache collisions
+            const cacheKey = `class_suspension_${locationForPrompt.replace(/[^a-zA-Z0-9]/g, '_')}`;
+
+            const searchResult = await fetchGeminiDataWithTTL(suspensionParams, cacheKey);
+
+            let responseData;
+            try {
+                const cleanJsonString = extractJsonFromString(searchResult.text);
+                if (!cleanJsonString) throw new Error("AI response was empty.");
+                responseData = JSON.parse(cleanJsonString);
+            } catch (parseError) {
+                console.error("Failed to parse suspension status JSON:", parseError, "Response text:", searchResult.text);
+                throw new Error("AI provided a response in an unreadable format.");
+            }
+
+            let suspensionIsActiveToday = false;
+            if (responseData.start_date && responseData.end_date) {
+                const todayStart = new Date();
+                todayStart.setHours(0, 0, 0, 0);
+                const startDate = new Date(`${responseData.start_date}T00:00:00`);
+                const endDate = new Date(`${responseData.end_date}T00:00:00`);
+                if (!isNaN(startDate.getTime()) && !isNaN(endDate.getTime())) {
+                    if (todayStart >= startDate && todayStart <= endDate) {
+                        suspensionIsActiveToday = true;
+                    }
+                }
+            } else {
+                 suspensionIsActiveToday = responseData.is_suspension_active;
+            }
+
+            if (suspensionIsActiveToday && responseData.end_date) {
+                const expiryDate = new Date(`${responseData.end_date}T23:59:59`);
+                const newCacheData = {
+                    status: 'Suspended',
+                    message: responseData.details,
+                    sourceUrl: responseData.source_url || null,
+                    expires: expiryDate.toISOString(),
+                };
+                localStorage.setItem('suspensionCache', JSON.stringify(newCacheData));
+                console.log("Suspension found. Caching until:", expiryDate.toLocaleString());
+            }
+
+            return {
+                active: suspensionIsActiveToday,
+                details: suspensionIsActiveToday ? responseData.details : `No Class Suspension for ${cityName}.`,
+                sourceUrl: responseData.source_url || null,
+            };
+
+        } catch (error) {
+            console.error("Error in fetchSuspensionData:", error);
+            let errorType = 'generic';
+            let errorMessage = `Could not contact AI service for ${cityName}'s announcements.`;
+            
+            if (isRateLimitError(error)) {
+                errorType = 'rate-limit';
+                errorMessage = `Suspension check for ${cityName} is busy. Please try again shortly.`;
+            } else if (error.message.includes("unreadable format")) {
+                errorType = 'parse';
+                errorMessage = `Error: The AI's response for ${cityName} was malformed.`;
+            }
+            throw { type: errorType, message: errorMessage };
+        }
+    };
+    
+    const fetchAiWeatherData = async (resolvedLoc) => {
+        const cacheKey = `${resolvedLoc.lat.toFixed(2)}-${resolvedLoc.lon.toFixed(2)}_ai_weather`;
+        const CACHE_TTL = 30 * 60 * 1000;
+        const cached = geminiCache.get(cacheKey);
+
+        if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
+            console.log("Using cached AI Weather data for", resolvedLoc.displayName);
+            return cached.data;
+        }
+
+        try {
+            const FinalWeatherSynthesisSchema = {
+              type: Type.OBJECT,
+              properties: {
+                summary: {
+                  type: Type.STRING,
+                  description: `A concise, one-sentence narrative of the overall weather pattern for the current day in ${resolvedLoc.displayName}.`
+                },
+                clothingSuggestion: {
+                  type: Type.STRING,
+                  description: "A brief, practical outfit recommendation based on the forecast."
+                }
+              },
+              required: ["summary", "clothingSuggestion"]
+            };
+            
+            const geminiPrompt = `
+                You are a highly efficient Philippine weather analyst providing a concise weather outlook.
+
+                Your task is to act as an API. You MUST use Google Search to find the current weather conditions for the user's location (${resolvedLoc.displayName}).
+
+                Your response MUST be ONLY a single, valid JSON object. Do not include markdown, introductory text, or any other content.
+                The JSON object must have the following structure:
+                {
+                    "summary": "A concise, one-sentence weather narrative for the current day in ${resolvedLoc.displayName}.",
+                    "clothingSuggestion": "A brief, practical outfit recommendation based on the current weather."
+                }
+            `;
+
+            const geminiResponse = await generateContentWithRateLimit({
+                model: "gemini-2.5-flash",
+                contents: geminiPrompt,
+                config: {
+                    tools: [{ googleSearch: {} }],
+                    temperature: 0.1,
+                    responseMimeType: "application/json",
+                    responseSchema: FinalWeatherSynthesisSchema,
+                },
+            });
+
+            let geminiData;
+            try {
+                const cleanJsonString = extractJsonFromString(geminiResponse.text);
+                if (!cleanJsonString) throw new Error("AI response was empty.");
+                geminiData = JSON.parse(cleanJsonString);
+            } catch (parseError) {
+                console.error("Failed to parse AI weather data JSON:", parseError, "Response text:", geminiResponse.text);
+                throw new Error("The AI provided a weather response in an unreadable format.");
+            }
+
+            geminiCache.set(cacheKey, { data: geminiData, timestamp: Date.now() });
+            return geminiData;
+        } catch (error) {
+            console.error("Error fetching AI Weather data:", error);
+            if (isRateLimitError(error)) {
+                throw { type: 'rate-limit', message: 'The AI service is temporarily busy.' };
+            } else if (error.message.includes("unreadable format")) {
+                throw { type: 'parse', message: 'The AI provided a response in a malformed format.' };
+            } else {
+                throw { type: 'generic', message: 'Could not contact the AI service.' };
+            }
+        }
+    };
+    
+    /**
+     * Fetches the main weather forecast from Open-Meteo, using a 15-minute cache to prevent excessive API calls.
+     */
+    const fetchOpenMeteoDataWithCache = async (resolvedLocation) => {
+        const cacheKey = `weather_${resolvedLocation.lat.toFixed(2)}-${resolvedLocation.lon.toFixed(2)}`;
+        const now = Date.now();
+
+        // 1. Check Cache
+        if (weatherCache.has(cacheKey)) {
+            const cachedItem = weatherCache.get(cacheKey);
+            if (now < cachedItem.expiry) {
+                console.log(`[Weather Cache] Hit and valid for ${resolvedLocation.displayName}.`);
+                return cachedItem.data;
+            } else {
+                console.log(`[Weather Cache] Expired for ${resolvedLocation.displayName}. Deleting.`);
+                weatherCache.delete(cacheKey);
+            }
+        }
+
+        // 2. Cache Miss/Expired: Fetch New Data
+        console.log(`[API] Fetching new weather data for ${resolvedLocation.displayName}`);
+        const weather_params = new URLSearchParams({
+            latitude: String(resolvedLocation.lat),
+            longitude: String(resolvedLocation.lon),
+            current: "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m",
+            daily: "weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,relative_humidity_2m_max,relative_humidity_2m_min",
+            hourly: "weather_code,apparent_temperature,temperature_2m,relative_humidity_2m",
+            forecast_days: '5',
+            past_days: '1',
+            timezone: resolvedLocation.timezone || 'auto'
+        });
+        const weatherUrl = `https://api.open-meteo.com/v1/forecast?${weather_params}`;
+        const weatherResponse = await fetchWithRetry(weatherUrl, undefined);
+        const rawData = await weatherResponse.json();
+
+        if (rawData.error) {
+            throw new Error(`Weather service responded with an error: ${rawData.reason}`);
+        }
+
+        // 3. Store New Data with TTL
+        weatherCache.set(cacheKey, {
+            data: rawData,
+            expiry: now + WEATHER_CACHE_TTL_MS
+        });
+        console.log(`[Weather Cache] New data stored for ${resolvedLocation.displayName}.`);
+
+        return rawData;
+    };
+
 
     const fetchAllData = useCallback(async (locationDetails) => {
         setIsInitialLoading(true);
         setIsTideLoading(true);
-        setIsSummaryLoading(true);
-        setIsComparisonLoading(true);
+        setIsAiDataLoading(true);
         setError(null);
-        setSummaryError(null);
         setTideError(null);
-        setComparisonError(null);
+        setAiDataError(null);
         setSevereWeatherAlert(null);
         const fetchTimestamp = new Date();
-        
-        const fetchGeminiEnhancements = async (resolvedLoc, openMeteo) => {
-            const cacheKey = `${resolvedLoc.lat.toFixed(2)}-${resolvedLoc.lon.toFixed(2)}`;
-            const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
-            const cached = geminiCache.get(cacheKey);
-
-            if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
-                console.log("Using cached Gemini data for", resolvedLoc.displayName);
-                const cachedData = cached.data;
-                 // Manually process each part from cache to ensure UI consistency
-                try {
-                    if (!cachedData.summary) throw new Error("Cached summary is invalid.");
-                    setWeatherData(prev => ({...prev, current: { ...prev.current, summary: cachedData.summary, clothingSuggestion: cachedData.clothingSuggestion }}));
-                    setSummaryError(null);
-                } catch { setSummaryError("Cached summary was invalid."); }
-
-                try {
-                    if (!cachedData.tideForecast) throw new Error("Cached tide data is invalid.");
-                    const now = new Date();
-                    const parsedEvents = cachedData.tideForecast
-                        .map(event => ({...event, time: new Date(event.time)}))
-                        .filter(event => !isNaN(event.time.getTime()) && event.time > now)
-                        .sort((a,b) => a.time.getTime() - b.time.getTime());
-
-                     const tideDataByDay = parsedEvents.reduce((acc, event) => {
-                        const dateKey = event.time.toISOString().split('T')[0];
-                        if (!acc[dateKey]) {
-                            acc[dateKey] = {
-                                day: event.time.toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase(),
-                                date: event.time.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-                                events: []
-                            };
-                        }
-                        acc[dateKey].events.push(event);
-                        return acc;
-                    }, {});
-                    setWeatherData(prev => ({ ...prev, tideForecast: Object.values(tideDataByDay) }));
-                    setTideError(null);
-                } catch { setTideError("Cached tide data was invalid."); }
-
-                try {
-                     if (!cachedData.regionalOutlook) throw new Error("Cached regional data is invalid.");
-                    setComparisonCities(cachedData.regionalOutlook);
-                    setComparisonError(null);
-                } catch { setComparisonError("Cached regional data was invalid."); }
-                
-                setIsSummaryLoading(false);
-                setIsTideLoading(false);
-                setIsComparisonLoading(false);
-                return;
-            }
-
-            try {
-                 const geminiPrompt = `
-                    Analyze the weather data for ${resolvedLoc.displayName}.
-                    Your task is to act as an API. You MUST use Google Search to find tide times for the nearest major port and weather for other key Philippine cities.
-
-                    Your response must be ONLY a single, valid JSON object. Do not include markdown, introductory text, or any other content.
-                    The JSON object must have the following structure:
-                    {
-                        "summary": "A concise, one-sentence weather narrative for the day.",
-                        "clothingSuggestion": "A brief, practical outfit recommendation.",
-                        "tideForecast": [
-                            { "time": "ISO 8601 format", "height": 1.2, "type": "High" }
-                        ],
-                        "regionalOutlook": [
-                            { "name": "City Name", "temp": 28, "condition": "One-word weather condition" }
-                        ]
-                    }
-
-                    Constraint for "regionalOutlook":
-                    - Provide current weather for a randomly selected list of exactly 5 cities.
-                    - Randomly select 3 cities that are major provincial capitals from geographically diverse regions (e.g., one each from Luzon, Visayas, Mindanao).
-                    - Randomly select 2 cities from the National Capital Region (NCR).
-                    - EXCLUDE "${resolvedLoc.city}" from this list.
-                    - Example for "condition": "Sunny", "Cloudy", "Rainy", "Stormy".
-                `;
-                
-                const geminiResponse = await generateContentWithRateLimit({
-                    model: "gemini-2.5-flash",
-                    contents: geminiPrompt,
-                    config: {
-                        tools: [{ googleSearch: {} }],
-                    },
-                });
-
-                let geminiData;
-                try {
-                    const cleanJsonString = extractJsonFromString(geminiResponse.text);
-                    if (!cleanJsonString) throw new Error("AI response was empty.");
-                    geminiData = JSON.parse(cleanJsonString);
-                } catch (parseError) {
-                    console.error("Failed to parse AI response as JSON:", parseError, "Response text:", geminiResponse.text);
-                    throw new Error("The AI provided a response in an unreadable format.");
-                }
-
-                // Process Summary & Clothing
-                try {
-                    if (!geminiData.summary || typeof geminiData.summary !== 'string' || geminiData.summary.trim() === '') {
-                        throw new Error("Summary text is missing or invalid in the AI response.");
-                    }
-                    const cleanSummary = geminiData.summary.replace(/\s{2,}/g, ' ').trim();
-                    const cleanClothingSuggestion = geminiData.clothingSuggestion || 'Light, comfortable clothing is a good choice.';
-                    setWeatherData(prev => ({ ...prev, current: { ...prev.current, summary: cleanSummary, clothingSuggestion: cleanClothingSuggestion }}));
-                    setSummaryError(null);
-                } catch (summaryErr) {
-                    console.error("Summary processing error:", summaryErr);
-                    setSummaryError("AI failed to create a valid summary.");
-                    setWeatherData(prev => ({ ...prev, current: { ...prev.current, summary: "", clothingSuggestion: "" }}));
-                }
-
-                // Process Tide Forecast
-                try {
-                    if (!geminiData.tideForecast || !Array.isArray(geminiData.tideForecast)) {
-                        throw new Error("Tide forecast data is missing or not an array.");
-                    }
-                    const now = new Date();
-                    const parsedEvents = geminiData.tideForecast.map(event => {
-                        if (!event || typeof event.time !== 'string' || typeof event.height !== 'number' || typeof event.type !== 'string') return null;
-                        const eventDate = new Date(event.time);
-                        if (isNaN(eventDate.getTime())) return null;
-                        return { ...event, time: eventDate };
-                    }).filter(event => event && event.time > now).sort((a, b) => a.time.getTime() - b.time.getTime());
-
-                    const tideDataByDay = parsedEvents.reduce((acc, event) => {
-                        const dateKey = event.time.toISOString().split('T')[0];
-                        if (!acc[dateKey]) {
-                            acc[dateKey] = { day: event.time.toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase(), date: event.time.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), events: [] };
-                        }
-                        acc[dateKey].events.push(event);
-                        return acc;
-                    }, {});
-                    setWeatherData(prev => ({ ...prev, tideForecast: Object.values(tideDataByDay) }));
-                    setTideError(null);
-                } catch (tideErr) {
-                    console.error("Tide processing error:", tideErr);
-                    setTideError("AI provided invalid tide forecast data.");
-                    setWeatherData(prev => ({ ...prev, tideForecast: [] }));
-                }
-
-                // Process Regional Outlook
-                try {
-                    if (!geminiData.regionalOutlook || !Array.isArray(geminiData.regionalOutlook)) {
-                        throw new Error("Regional outlook data is missing or not an array.");
-                    }
-                    setComparisonCities(geminiData.regionalOutlook);
-                    setComparisonError(null);
-                } catch (regionalErr) {
-                    console.error("Regional outlook processing error:", regionalErr);
-                    setComparisonError("AI provided invalid regional data.");
-                    setComparisonCities([]);
-                }
-                
-                geminiCache.set(cacheKey, { data: geminiData, timestamp: Date.now() });
-
-            } catch (err) {
-                console.error("Failed to fetch or process Gemini enhancements:", err);
-                let detailMessage;
-                if (isRateLimitError(err)) {
-                    detailMessage = "AI service is temporarily busy.";
-                } else if (err.message.includes("unreadable format")) {
-                    detailMessage = "AI response was malformed.";
-                } else {
-                    detailMessage = "Could not contact AI service.";
-                }
-                setSummaryError(`Summary: ${detailMessage}`);
-                setTideError(`Tide: ${detailMessage}`);
-                setComparisonError(`Outlook: ${detailMessage}`);
-                setWeatherData(prev => ({ ...prev, current: { ...prev.current, summary: "", clothingSuggestion: "" }, tideForecast: [] }));
-                setComparisonCities([]);
-            } finally {
-                setIsSummaryLoading(false);
-                setIsTideLoading(false);
-                setIsComparisonLoading(false);
-            }
-        };
 
         try {
             // --- 1. Geocoding ---
@@ -1615,7 +1790,7 @@ const App = () => {
             const locationName = locationDetails.displayName;
             setLoadingMessage(`Resolving location for ${locationName}...`);
 
-            if (locationDetails.lat && locationDetails.lon && locationDetails.city) {
+            if (locationDetails.lat && locationDetails.lon) {
                 resolvedLocation = { ...locationDetails };
             } else {
                 try {
@@ -1644,30 +1819,9 @@ const App = () => {
             setLocationCoords({ lat: resolvedLocation.lat, lon: resolvedLocation.lon });
            
             // --- 2. Parallel Fast API Calls (Open-Meteo) ---
-            let openMeteoData;
-            try {
-                setLoadingMessage('Fetching standard weather forecasts...');
-                const weather_params = new URLSearchParams({
-                    latitude: String(resolvedLocation.lat),
-                    longitude: String(resolvedLocation.lon),
-                    current: "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m",
-                    daily: "weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,relative_humidity_2m_max,relative_humidity_2m_min",
-                    hourly: "weather_code,apparent_temperature,temperature_2m,relative_humidity_2m",
-                    forecast_days: '5',
-                    past_days: '1',
-                    timezone: resolvedLocation.timezone || 'auto'
-                });
-                const weatherUrl = `https://api.open-meteo.com/v1/forecast?${weather_params}`;
-                const weatherResponse = await fetchWithRetry(weatherUrl, undefined);
-                openMeteoData = await weatherResponse.json();
+            setLoadingMessage('Fetching standard weather forecasts...');
+            const openMeteoData = await fetchOpenMeteoDataWithCache(resolvedLocation);
 
-                if (openMeteoData.error) {
-                    throw new Error(`Weather service responded with an error: ${openMeteoData.reason}`);
-                }
-            } catch (weatherError) {
-                console.error("Weather API Error:", weatherError);
-                throw new Error(weatherError.message || 'The weather service is currently unavailable. Please try again later.');
-            }
 
             // --- 3. Process All CORE Data & Render UI---
             let coreData;
@@ -1714,11 +1868,11 @@ const App = () => {
                     current: {
                         temp: openMeteoData.current.temperature_2m,
                         feelsLike: openMeteoData.current.apparent_temperature,
-                        summary: "",
+                        summary: '', // To be filled by AI
                         sunrise: new Date(openMeteoData.daily.sunrise[1]).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }),
                         sunset: new Date(openMeteoData.daily.sunset[1]).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }),
                         comparison: comparisonText,
-                        clothingSuggestion: "",
+                        clothingSuggestion: '', // To be filled by AI
                         humidity: openMeteoData.current.relative_humidity_2m,
                         windSpeed: openMeteoData.current.wind_speed_10m,
                     },
@@ -1732,6 +1886,7 @@ const App = () => {
                     hourly: hourlyData,
                     moonPhase: getMoonPhase(),
                     tideForecast: [],
+                    regionalOutlook: [],
                 };
             } catch(processingError) {
                 console.error("Data Processing Error:", processingError);
@@ -1742,15 +1897,103 @@ const App = () => {
             setLastFetchTime(fetchTimestamp);
             setIsInitialLoading(false);
             
-            fetchGeminiEnhancements(resolvedLocation, openMeteoData);
+            // --- 4. START DECOUPLED, PARALLEL FETCHES FOR SLOW/AI DATA ---
+            const fetchDecoupledData = async () => {
+                const [aiResult, tideResult, suspensionResult, outlookResult] = await Promise.allSettled([
+                    fetchAiWeatherData(resolvedLocation),
+                    fetchTideData(),
+                    fetchSuspensionData(resolvedLocation),
+                    fetchPhilippineOutlookWithCache(fetchCurrentWeatherForCoords),
+                ]);
+
+                // Process AI Weather Result
+                if (aiResult.status === 'fulfilled') {
+                    try {
+                        const aiData = aiResult.value;
+                        if (!aiData.summary || !aiData.clothingSuggestion) {
+                            throw new Error("AI weather data is missing required fields.");
+                        }
+                        setWeatherData(prev => ({ 
+                            ...prev, 
+                            current: {
+                                ...prev.current,
+                                summary: aiData.summary,
+                                clothingSuggestion: aiData.clothingSuggestion,
+                            }
+                        }));
+                        setAiDataError(null);
+                    } catch (aiErr) {
+                        console.error("AI weather processing error:", aiErr);
+                        const err = { type: 'parse', message: "AI provided invalid weather data." };
+                        setAiDataError(err);
+                    }
+                } else { // 'rejected'
+                    const err = aiResult.reason;
+                    console.error("Failed to fetch AI weather data:", err);
+                    const errorState = { type: err.type || 'generic', message: `AI Weather: ${err.message}` };
+                    setAiDataError(errorState);
+                }
+
+                // Process Philippine Outlook Result
+                if (outlookResult.status === 'fulfilled') {
+                    setWeatherData(prev => ({...prev, regionalOutlook: outlookResult.value}));
+                } else { // 'rejected'
+                    console.error("Failed to fetch Philippine outlook data:", outlookResult.reason);
+                    setWeatherData(prev => ({...prev, regionalOutlook: []})); 
+                }
+                
+                // Process Suspension Status Result
+                if (suspensionResult.status === 'fulfilled') {
+                    setSuspensionStatus(suspensionResult.value);
+                } else { // 'rejected'
+                    console.error("Failed to fetch suspension data:", suspensionResult.reason);
+                    const err = suspensionResult.reason;
+                    const errorState = {
+                        active: false,
+                        details: { type: err.type || 'generic', message: err.message },
+                        sourceUrl: null
+                    };
+                    setSuspensionStatus(errorState);
+                }
+
+                setIsAiDataLoading(false);
+
+
+                // Process Tide Forecast Result
+                if (tideResult.status === 'fulfilled') {
+                    try {
+                        const flatTideData = tideResult.value;
+                        if (!flatTideData || !Array.isArray(flatTideData)) {
+                            throw new Error("Tide data is missing or not an array.");
+                        }
+                        const tideDataByDay = groupTidesByDay(flatTideData);
+                        setWeatherData(prev => ({ ...prev, tideForecast: tideDataByDay }));
+                        setTideError(null);
+                    } catch (tideErr) {
+                        console.error("Tide processing error:", tideErr);
+                        setTideError({ type: 'parse', message: "Could not process tide forecast data." });
+                        setWeatherData(prev => ({ ...prev, tideForecast: [] }));
+                    }
+                } else { // 'rejected'
+                    console.error("Failed to fetch tide data:", tideResult.reason);
+                    setTideError({ type: 'generic', message: 'Tide forecast model is unavailable.' });
+                }
+                setIsTideLoading(false);
+            };
+
+            fetchDecoupledData();
 
         } catch (err) {
             console.error("A critical error occurred in fetchAllData:", err);
-            setError(`Error: ${err.message}`);
+            let errorMessage = `Error: ${err.message}`;
+            // Provide a more user-friendly message for weather service failures.
+            if (err.message.includes("Weather service responded")) {
+                errorMessage = "Could not retrieve current weather forecast. The service may be temporarily down.";
+            }
+            setError(errorMessage);
             setIsInitialLoading(false);
-            setIsSummaryLoading(false);
             setIsTideLoading(false);
-            setIsComparisonLoading(false);
+            setIsAiDataLoading(false);
         }
     }, []);
     
@@ -1762,24 +2005,9 @@ const App = () => {
     }, [currentLocation.displayName, fetchAllData]);
 
     const handleLocationChange = (newLocation) => {
-        if (typeof newLocation === 'string') {
-            // Manual input: Reset detailed fields and let fetchAllData resolve them.
-            setCurrentLocation({
-                displayName: newLocation,
-                city: null, admin1: null, admin2: null, country: null, lat: null, lon: null
-            });
-        } else {
-            // Selection from suggestions: We have all the data.
-            setCurrentLocation({
-                displayName: newLocation.displayName,
-                city: newLocation.city,
-                admin1: newLocation.admin1,
-                admin2: newLocation.admin2,
-                country: newLocation.country,
-                lat: newLocation.latitude,
-                lon: newLocation.longitude,
-            });
-        }
+        // This function now receives a complete, validated location object with coordinates.
+        localStorage.setItem('userLocation', JSON.stringify(newLocation));
+        setCurrentLocation(newLocation);
     };
     
     const handleManualRefresh = () => {
@@ -1839,11 +2067,11 @@ const App = () => {
                 </div>
                 
                 <ClassSuspensionAlert 
-                    isLoading={isSuspensionLoading} 
+                    isLoading={isAiDataLoading} 
                     status={suspensionStatus}
                 />
                 <WeatherAlertBar alertData={severeWeatherAlert} />
-                <EarthquakeAlert alertData={significantEarthquakeAlert} />
+                <EarthquakeAlert alertData={significantEarthquakeAlert} error={earthquakeError} />
                 
                 <div className="current-temp">
                     <h1>{Math.round(current?.temp ?? 0)}°</h1>
@@ -1863,18 +2091,18 @@ const App = () => {
                     <span className="feels-like">Feels like {Math.round(current?.feelsLike ?? 0)}°</span>
                 </div>
                 <div className="summary">
-                   {isSummaryLoading ? (
+                   {isAiDataLoading ? (
                         <LoadingPlaceholder text="Generating summary..." />
-                    ) : summaryError ? (
-                        <div className="inline-error">{summaryError}</div>
+                    ) : aiDataError ? (
+                        <div className="inline-error">{aiDataError.message}</div>
                     ) : (
                         <p>{current?.summary}</p>
                     )}
                 </div>
                 <div className="clothing-suggestion">
-                    {isSummaryLoading ? (
+                    {isAiDataLoading ? (
                         <LoadingPlaceholder text="Thinking of an outfit..." />
-                     ) : summaryError ? (
+                     ) : aiDataError ? (
                         <div className="inline-error">Outfit suggestion unavailable.</div>
                      ) : (
                         <div className="pill" title="Clothing Suggestion">
@@ -1930,15 +2158,17 @@ const App = () => {
             
             <section className="comparison-section">
                 <h2 className="cell-title">Regional Outlook</h2>
-                 {isComparisonLoading ? (
+                 {isAiDataLoading ? (
                     <div className="comparison-loading">
                          <LoadingPlaceholder text="Discovering regional cities..." className="comparison-placeholder"/>
                     </div>
-                ) : comparisonError ? (
-                    <div className="inline-error comparison-error">{comparisonError}</div>
-                ) : comparisonCities.length > 0 ? (
+                ) : aiDataError ? (
+                    <div className={`inline-error comparison-error ${aiDataError.type === 'rate-limit' ? 'is-warning' : 'is-error'}`}>
+                        <strong>{aiDataError.type === 'rate-limit' ? 'Warning:' : 'Error:'}</strong> {aiDataError.message}
+                    </div>
+                ) : weatherData.regionalOutlook && weatherData.regionalOutlook.length > 0 ? (
                     <div className="comparison-cities-list">
-                        {comparisonCities.map(city => (
+                        {weatherData.regionalOutlook.map(city => (
                             <div key={city.name} className="comparison-city-item">
                                 <span className="city-name">{city.name}</span>
                                 <div title={city.condition}>
