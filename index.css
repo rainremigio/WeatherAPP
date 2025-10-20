@@ -1,5 +1,3 @@
-
-
 ---
 :root, [data-theme="light"]] {
   --font-family: 'Roboto Mono', monospace;
@@ -197,9 +195,7 @@ body {
   grid-template-columns: 1fr; /* Single column for mobile */
   grid-template-areas:
     "location"
-    "suspension-alert"
-    "eq-alert"
-    "weather-alert"
+    "alerts"
     "temp-main"
     "details"
     "summary"
@@ -752,63 +748,73 @@ body {
 
 
 /* --- News Ticker --- */
-@keyframes scroll-left {
-  0% { transform: translateX(0%); }
-  100% { transform: translateX(-50%); }
-}
-
-@keyframes scroll-from-right {
-  from {
-    transform: translateX(100%);
+@keyframes fade-slide-cycle {
+  0% {
+    opacity: 0;
+    transform: translateY(100%);
   }
-  to {
-    transform: translateX(-100%);
+  10%, 90% { /* Fade in, stay visible, then fade out */
+    opacity: 1;
+    transform: translateY(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-100%);
   }
 }
 
 @keyframes pulse-red {
-  0% {
-    box-shadow: 0 0 0 0 rgba(231, 76, 60, 0.7);
-  }
-  70% {
-    box-shadow: 0 0 0 10px rgba(231, 76, 60, 0);
-  }
-  100% {
-    box-shadow: 0 0 0 0 rgba(231, 76, 60, 0);
-  }
+    0% {
+        transform: scale(0.95);
+        opacity: 1;
+    }
+    70% {
+        transform: scale(1.05);
+        opacity: 0.7;
+    }
+    100% {
+        transform: scale(0.95);
+        opacity: 1;
+    }
 }
 
 @keyframes pulse-green {
-  0% {
-    box-shadow: 0 0 0 0 rgba(46, 204, 113, 0.7);
-  }
-  70% {
-    box-shadow: 0 0 0 10px rgba(46, 204, 113, 0);
-  }
-  100% {
-    box-shadow: 0 0 0 0 rgba(46, 204, 113, 0);
-  }
+    0% {
+        transform: scale(0.95);
+        opacity: 1;
+    }
+    70% {
+        transform: scale(1.05);
+        opacity: 0.7;
+    }
+    100% {
+        transform: scale(0.95);
+        opacity: 1;
+    }
 }
 
 @keyframes pulse-yellow {
-  0% {
-    box-shadow: 0 0 0 0 rgba(243, 156, 18, 0.7);
-  }
-  70% {
-    box-shadow: 0 0 0 10px rgba(243, 156, 18, 0);
-  }
-  100% {
-    box-shadow: 0 0 0 0 rgba(243, 156, 18, 0);
-  }
+    0% {
+        transform: scale(0.95);
+        opacity: 1;
+    }
+    70% {
+        transform: scale(1.05);
+        opacity: 0.7;
+    }
+    100% {
+        transform: scale(0.95);
+        opacity: 1;
+    }
 }
 
-.news-ticker-container, .breaking-news-ticker {
+.news-ticker-container {
   display: flex;
-  align-items: stretch;
+  align-items: center;
   background-color: var(--ticker-bg);
   color: var(--ticker-text);
   white-space: nowrap;
-  font-size: 0.8rem;
+  font-size: 0.85rem;
   border-top: 1px solid var(--border-color);
   flex-shrink: 0;
   text-transform: uppercase;
@@ -828,51 +834,42 @@ body {
   transition: background-color 0.5s ease, color 0.5s ease;
 }
 
-/* Breaking News Styles */
-.breaking-news-ticker {
-    background-color: var(--alert-bg);
-    color: white;
-    border-top: none; /* No top border if it's below the other ticker */
-}
-[data-theme="dark"] .breaking-news-ticker {
-    color: var(--text-color);
-}
-
-.breaking-news-ticker .news-ticker-label {
-    background-color: white;
-    color: var(--alert-bg);
-}
-[data-theme="dark"] .breaking-news-ticker .news-ticker-label {
-    background-color: var(--text-color);
-}
-
-
 .news-ticker-wrapper {
   flex-grow: 1;
   overflow: hidden;
   position: relative;
+  display: flex;
+  align-items: center;
 }
 
 .news-ticker-content {
-  position: absolute;
-  top: 0;
-  left: 0;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  /* Set animation properties individually for easier override */
-  animation-name: scroll-left;
-  animation-duration: 90s; /* Fallback duration for latest news */
-  animation-timing-function: linear;
-  animation-iteration-count: infinite;
+  width: 100%;
+  animation: fade-slide-cycle 6s ease-in-out forwards;
 }
 
-.breaking-news-ticker .news-ticker-content {
-  animation-name: scroll-from-right;
+.is-breaking-mode .news-ticker-content {
+    animation-duration: 4s; /* Faster animation for breaking news */
 }
 
 .news-ticker-content span {
-  padding-right: 2rem;
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 0 0.5rem;
+}
+
+
+/* --- Integrated Breaking News Styling --- */
+.news-ticker-container.is-breaking-mode {
+    background-color: #c0392b; /* Red alert background */
+    color: #fff;
+    border-top: none; /* Remove top border for a flush look */
+}
+
+.news-ticker-container.is-breaking-mode .news-ticker-label {
+    background-color: #fff;
+    color: #c0392b;
 }
 
 
@@ -1196,6 +1193,13 @@ body {
 }
 
 /* --- Alert Bar Styles (Weather & Earthquake) --- */
+.alert-stack {
+  grid-area: alerts;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
 .weather-alert-bar,
 .earthquake-alert {
   background-color: var(--eq-alert-bg);
@@ -1216,17 +1220,18 @@ body {
   overflow: hidden;
   white-space: nowrap;
   margin-top: 0;
+  transition: max-width 0.3s ease-in-out, 
+              margin-top 0.3s ease-in-out,
+              padding-top 0.3s ease-in-out,
+              padding-bottom 0.3s ease-in-out,
+              opacity 0.3s ease-in-out;
 }
-
-.weather-alert-bar { grid-area: weather-alert; }
-.earthquake-alert { grid-area: eq-alert; }
 
 .weather-alert-bar.shrunk,
 .earthquake-alert.shrunk {
   max-width: 260px;
   padding-top: 0.2rem;
   padding-bottom: 0.2rem;
-  margin-top: -0.5rem; /* Counteract the mobile grid-gap */
 }
 
 .weather-alert-bar svg,
@@ -1255,7 +1260,6 @@ body {
 
 /* --- Class Suspension Alert --- */
 .class-suspension-alert {
-    grid-area: suspension-alert;
     padding: 0.6rem 0.5rem;
     text-align: center;
     font-weight: 500;
@@ -1309,7 +1313,7 @@ body {
 
 .btn-details {
     background-color: rgba(255, 255, 255, 0.2);
-    border: 1px solid rgba(255, 255, 255, 0.5);
+    border: 1px solid rgba(255, 255, 0.5);
     color: inherit; /* Inherits color from parent, so it's white on orange bg */
     font-family: var(--font-family);
     font-size: 0.7rem;
@@ -1370,21 +1374,27 @@ body {
 }
 
 .eq-item {
-  display: flex;
+  display: grid;
+  grid-template-columns: 65px 1px 1fr;
+  grid-template-rows: auto auto;
+  grid-template-areas:
+    "mag sep info"
+    "mag sep map";
   align-items: center;
-  gap: 0.75rem;
+  column-gap: 0.75rem;
+  row-gap: 0.5rem;
   padding: 0.75rem 1rem;
-  border-bottom: none;
   background-color: var(--frame-color);
   border-radius: 8px;
 }
 
 .eq-magnitude {
+  grid-area: mag;
+  align-self: stretch;
   flex-shrink: 0;
   font-weight: 500;
   width: 65px;
   text-align: center;
-  border-right: none;
   padding-right: 0;
   display: flex;
   flex-direction: column;
@@ -1408,6 +1418,7 @@ body {
 .eq-magnitude.mag-low { color: var(--eq-mag-low); }
 
 .eq-separator {
+    grid-area: sep;
     width: 1px;
     align-self: stretch;
     background-color: var(--border-color);
@@ -1415,11 +1426,13 @@ body {
 }
 
 .eq-info {
+  grid-area: info;
   display: flex;
   flex-direction: column;
   gap: 0.2rem;
   flex-grow: 1;
   min-width: 0;
+  align-self: start;
 }
 .eq-location {
   font-size: 1rem;
@@ -1432,6 +1445,22 @@ body {
   font-size: 0.8rem;
   color: var(--text-color-light);
 }
+
+.eq-map-container {
+    grid-area: map;
+    height: 100px;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid var(--border-color);
+}
+
+.eq-map-container iframe {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    pointer-events: none; /* Prevents map interaction from hijacking scroll */
+}
+
 
 .inline-error {
   font-size: 0.8rem;
@@ -1460,23 +1489,20 @@ body {
   .top-section {
     grid-template-columns: 2fr 1fr; /* Use a flexible ratio for robust sizing */
     grid-template-areas:
-      "location          actions"
-      "suspension-alert  suspension-alert"
-      "temp-main         weather-alert"
-      "temp-main         eq-alert"
-      "details           details"
-      "summary           summary"
-      "clothing          clothing";
+      "location   actions"
+      "temp-main  alerts"
+      "details    alerts"
+      "summary    summary"
+      "clothing   clothing";
     gap: 0.25rem 1.5rem;
-    align-items: center; /* Vertically center items like the temp display */
+    align-items: start; /* Align grid items to the top for a cleaner look */
   }
   
   .header-main {
-      /* This is the key change: we make the container's children grid items themselves */
+      /* This allows the children of .header-main to be placed in the grid directly */
       display: contents;
   }
 
-  /* We can now place the children of .header-main into the new grid */
   .location-header {
       grid-area: location;
   }
@@ -1486,24 +1512,22 @@ body {
       justify-self: end;
   }
   
-  .weather-alert-bar {
-      justify-self: stretch;
+  .alert-stack {
+    justify-content: flex-start;
   }
+  
+  .weather-alert-bar,
   .earthquake-alert {
-    grid-area: eq-alert;
     justify-self: stretch;
   }
-  .current-temp { grid-area: temp-main; }
-  .weather-details { grid-area: details; }
-  .summary { grid-area: summary; }
-  .clothing-suggestion { grid-area: clothing; }
 
   .weather-alert-bar.shrunk,
   .earthquake-alert.shrunk {
     margin-top: 0; /* Reset mobile margin fix */
   }
   
-  .current-temp {
+  .current-temp { 
+    grid-area: temp-main;
     justify-content: flex-start;
   }
 
@@ -1511,8 +1535,9 @@ body {
   .current-temp h1 {
     font-size: 4rem;
   }
-
-  .weather-details {
+  
+  .weather-details { 
+    grid-area: details; 
     flex-direction: row;
     flex-wrap: wrap;
     align-items: baseline;
@@ -1523,7 +1548,12 @@ body {
     align-items: flex-start;
   }
 
-  .summary, .clothing-suggestion {
+  .summary { 
+    grid-area: summary;
+    text-align: left;
+  }
+  .clothing-suggestion { 
+    grid-area: clothing; 
     text-align: left;
   }
 
